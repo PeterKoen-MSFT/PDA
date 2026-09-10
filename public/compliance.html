@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cumulus Granitus · Compliance</title>
+    <script>
+      (() => {
+        const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+        const theme =
+          param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./compliance.js"></script>
+  </head>
+  <body data-page="compliance">
+    <div class="shell">
+      <header class="topbar" aria-label="Primary">
+        <div class="brand">
+          <div class="brand-mark">CG</div>
+          <div>
+            <div class="brand-name">Cumulus Granitus</div>
+            <div class="brand-note">Demo · fictional tools</div>
+          </div>
+        </div>
+        <nav class="toplinks" aria-label="Views">
+          <a href="./index.html">Chat</a>
+          <a href="./admin.html">Admin</a>
+          <a href="./compliance.html" aria-current="page">Compliance</a>
+        </nav>
+      </header>
+
+      <main class="page page--wide">
+        <section class="panel panel--solid">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Compliance</p>
+              <h1>Ledger, timeline, and verification</h1>
+              <p class="lede">The ledger comes from the API. Filters narrow the actual events, and verification reports tamper-evidence only.</p>
+            </div>
+            <div id="complianceStatus" class="badge-row" aria-live="polite"></div>
+          </div>
+
+          <div class="section">
+            <div class="filter-row">
+              <label class="field-row">
+                <span class="small-label">Agent</span>
+                <select id="filterAgent"></select>
+              </label>
+              <label class="field-row">
+                <span class="small-label">Chat</span>
+                <select id="filterChat"></select>
+              </label>
+              <label class="field-row">
+                <span class="small-label">Confidentiality</span>
+                <select id="filterLevel"></select>
+              </label>
+              <label class="field-row">
+                <span class="small-label">Tool</span>
+                <select id="filterTool"></select>
+              </label>
+              <label class="field-row">
+                <span class="small-label">Event type</span>
+                <select id="filterKind"></select>
+              </label>
+            </div>
+
+            <div class="toolbar">
+              <button type="button" id="refreshLedgerButton">Refresh</button>
+              <button type="button" id="verifyLedgerButton">Verify ledger</button>
+              <button type="button" class="primary" id="exportLedgerButton">Export selected chat only</button>
+            </div>
+            <p class="footnote">Prompt-bearing evidence can include sensitive data. Export contains only the currently selected chat record set.</p>
+          </div>
+
+          <div class="panel-body">
+            <div class="ledger-layout">
+              <div class="ledger-table-wrap">
+                <table class="ledger-table" aria-label="Ledger records">
+                  <thead>
+                    <tr>
+                      <th>Seq</th>
+                      <th>Time</th>
+                      <th>Kind</th>
+                      <th>Chat</th>
+                      <th>Agent</th>
+                      <th>Level</th>
+                      <th>Tool</th>
+                      <th>Outcome</th>
+                    </tr>
+                  </thead>
+                  <tbody id="ledgerRows"></tbody>
+                </table>
+              </div>
+
+              <aside class="side-panel" aria-label="Inspection and timeline">
+                <div>
+                  <h2>Inspect record</h2>
+                  <div id="recordInspector" class="stack"></div>
+                </div>
+                <div>
+                  <h2>Selected chat timeline</h2>
+                  <div id="chatTimeline" class="timeline"></div>
+                </div>
+                <div>
+                  <h2>Verification result</h2>
+                  <div id="verificationResult" class="stack"></div>
+                </div>
+              </aside>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

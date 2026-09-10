@@ -1,0 +1,611 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const DPAPI = loadDpapi();
+
+const PRIVATE_KEY_FILE = 'vault/signing-key.bin';
+const PUBLIC_KEY_FILE = 'vault/signing-key.public';
+const LEDGER_FILE = 'ledger.jsonl';
+const CHECKPOINT_FILE = 'ledger.checkpoint.json';
+const SECRET_MAX_LENGTH = 8192;
+const MODULE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+function loadDpapi() {
+  if (process.platform !== 'win32') {
+    throw new Error('DPAPI is only supported on Windows');
+  }
+
+  const dependencyRoot = path.resolve(
+    process.env.PDA_DEPENDENCIES || path.join(process.env.LOCALAPPDATA || os.homedir(), 'PDA', 'sdk-demo', 'dependencies'),
+  );
+
+  let packageExports;
+  try {
+    const dependencyRequire = createRequire(path.join(dependencyRoot, 'package.json'));
+    packageExports = dependencyRequire('@primno/dpapi');
+  } catch {
+    throw new Error(`Unable to load @primno/dpapi from ${path.join(dependencyRoot, 'node_modules', '@primno', 'dpapi')}`);
+  }
+
+  if (!packageExports?.isPlatformSupported) {
+    throw new Error('DPAPI is not supported on this platform');
+  }
+
+  const bindings = packageExports.Dpapi ?? packageExports.default;
+  if (!bindings || typeof bindings.protectData !== 'function' || typeof bindings.unprotectData !== 'function') {
+    throw new Error('Unable to resolve DPAPI bindings');
+  }
+
+  return bindings;
+}
+
+function structuredCloneFallback(value) {
+  if (typeof globalThis.structuredClone === 'function') {
+    return globalThis.structuredClone(value);
+  }
+
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') {
+    if (typeof value === 'bigint') {
+      return JSON.stringify(value.toString());
+    }
+    if (value === undefined) {
+      return 'null';
+    }
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalize(entry)).join(',')}]`;
+  }
+
+  const keys = Object.keys(value).filter(key => value[key] !== undefined).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}`;
+}
+
+function sha256Hex(text) {
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+function base64(input) {
+  return Buffer.from(input).toString('base64');
+}
+
+function toBuffer(value) {
+  if (Buffer.isBuffer(value)) {
+    return value;
+  }
+
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value);
+  }
+
+  if (typeof value === 'string') {
+    return Buffer.from(value, 'base64');
+  }
+
+  throw new Error('Unsupported binary payload');
+}
+
+function deepClone(value) {
+  return structuredCloneFallback(value);
+}
+
+function normalizePem(value) {
+  return String(value ?? '').trim();
+}
+
+function normalizeSecretText(value) {
+  if (typeof value !== 'string') {
+    throw new Error('Secrets must be strings');
+  }
+
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length > SECRET_MAX_LENGTH) {
+    throw new Error('Secret length is out of bounds');
+  }
+
+  return normalized;
+}
+
+function isSamePathOrDescendant(candidate, ancestor) {
+  const normalizedCandidate = path.resolve(candidate);
+  const normalizedAncestor = path.resolve(ancestor);
+  const candidateLower = normalizedCandidate.toLowerCase();
+  const ancestorLower = normalizedAncestor.toLowerCase();
+  return candidateLower === ancestorLower || candidateLower.startsWith(`${ancestorLower}${path.sep}`);
+}
+
+function findRepoRoot() {
+  return MODULE_ROOT;
+}
+
+function deepestExistingParent(targetPath) {
+  let current = path.resolve(targetPath);
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
+  return current;
+}
+
+function ensureDir(dirPath) {
+  fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function atomicWriteJson(filePath, value) {
+  ensureDir(path.dirname(filePath));
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const fd = fs.openSync(tempPath, 'w');
+  try {
+    fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  try {
+    fs.renameSync(tempPath, filePath);
+  } catch (error) {
+    if (fs.existsSync(tempPath)) {
+      try {
+        fs.rmSync(tempPath, { force: true });
+      } catch {
+        // ignore cleanup failures for temp files
+      }
+    }
+    throw error;
+  }
+}
+
+function readJson(filePath) {
+  const text = fs.readFileSync(filePath, 'utf8');
+  return JSON.parse(text);
+}
+
+function encodeProtected(value) {
+  const protectedValue = DPAPI.protectData(Buffer.from(String(value), 'utf8'), null, 'CurrentUser');
+  return base64(toBuffer(protectedValue));
+}
+
+function decodeProtected(value) {
+  const decrypted = DPAPI.unprotectData(toBuffer(value), null, 'CurrentUser');
+  const text = Buffer.from(decrypted).toString('utf8');
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === 'string' ? parsed : text;
+  } catch {
+    return text;
+  }
+}
+
+function recordBody(entry) {
+  const { hash, signature, publicKey, algorithm, issuer, ...body } = entry;
+  return body;
+}
+
+function sortLedgerRecords(records) {
+  return records.slice().sort((left, right) => left.seq - right.seq);
+}
+
+export class Store {
+  constructor(stateDir) {
+    this.repoRoot = findRepoRoot();
+    this.root = this._resolveRoot(stateDir);
+    this._ledgerPath = path.join(this.root, LEDGER_FILE);
+    this._checkpointPath = path.join(this.root, CHECKPOINT_FILE);
+    this._privateKeyPath = path.join(this.root, PRIVATE_KEY_FILE);
+    this._publicKeyPath = path.join(this.root, PUBLIC_KEY_FILE);
+    this._ledger = [];
+    this._privateKey = undefined;
+    this._publicKey = undefined;
+    this._poisonedError = undefined;
+
+    ensureDir(this.root);
+    ensureDir(path.dirname(this._privateKeyPath));
+    ensureDir(path.dirname(this._publicKeyPath));
+
+    this._loadOrCreateKeyPair();
+    this._ledger = this._loadLedger();
+    if (!fs.existsSync(this._checkpointPath)) {
+      if (this._ledger.length > 0) {
+        throw new Error('Missing ledger checkpoint');
+      }
+      this._writeCheckpoint(this._genesisCheckpoint());
+    }
+
+    this._verifyLedgerOrThrow();
+  }
+
+  seal(value) {
+    this._assertHealthy();
+    const payload = deepClone(value);
+    const payloadDigest = sha256Hex(canonicalize(payload));
+    const signature = crypto.sign(null, Buffer.from(payloadDigest, 'utf8'), this._privateKey).toString('base64');
+
+    return {
+      payload,
+      digest: payloadDigest,
+      signature,
+      publicKey: this._publicKey,
+      algorithm: 'Ed25519',
+      issuer: 'CG Demo Authority',
+      demo: true,
+    };
+  }
+
+  verify(sealed) {
+    const publicKey = normalizePem(sealed?.publicKey);
+    if (!sealed || sealed.algorithm !== 'Ed25519' || sealed.issuer !== 'CG Demo Authority' || sealed.demo !== true) {
+      return false;
+    }
+
+    if (sealed.payload === undefined || sealed.payload === null || typeof sealed.digest !== 'string' || typeof sealed.signature !== 'string' || publicKey !== this._publicKey) {
+      return false;
+    }
+
+    const expectedDigest = sha256Hex(canonicalize(sealed.payload));
+    if (expectedDigest !== sealed.digest) {
+      return false;
+    }
+
+    try {
+      return crypto.verify(
+        null,
+        Buffer.from(sealed.digest, 'utf8'),
+        sealed.publicKey,
+        Buffer.from(sealed.signature, 'base64'),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  append(kind, data = {}) {
+    this._assertHealthy();
+    if (this._ledger.length >= 20000) {
+      const error = new Error('Ledger limit reached');
+      this._poison(error);
+      throw error;
+    }
+
+    const previousHash = this._ledger.at(-1)?.hash ?? 'GENESIS';
+    const base = {
+      ...deepClone(data),
+      seq: this._ledger.length + 1,
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      kind,
+      previousHash,
+      demoCredentials: true,
+    };
+
+    const hash = sha256Hex(canonicalize(base));
+    const signature = crypto.sign(null, Buffer.from(hash, 'utf8'), this._privateKey).toString('base64');
+    const record = {
+      ...base,
+      hash,
+      signature,
+      publicKey: this._publicKey,
+      algorithm: 'Ed25519',
+      issuer: 'CG Demo Authority',
+    };
+
+    this._appendLedgerRecord(record);
+    return record;
+  }
+
+  records() {
+    this._assertHealthy();
+    return deepClone(this._ledger);
+  }
+
+  verifyLedger() {
+    try {
+      this._assertHealthy();
+      this._verifyLedgerOrThrow();
+      return {
+        ok: true,
+        checked: this._loadLedger().length,
+        storage: 'signed append-only file; not immutable storage',
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        checked: this._ledger.length,
+        error: error instanceof Error ? error.message : String(error),
+        storage: 'signed append-only file; not immutable storage',
+      };
+    }
+  }
+
+  save(name, value) {
+    this._assertHealthy();
+    this._assertSafeName(name);
+    const filePath = path.join(this.root, `${name}.json`);
+    atomicWriteJson(filePath, value);
+    return deepClone(value);
+  }
+
+  load(name, fallback) {
+    this._assertHealthy();
+    this._assertSafeName(name);
+    const filePath = path.join(this.root, `${name}.json`);
+
+    if (!fs.existsSync(filePath)) {
+      return fallback === undefined ? undefined : deepClone(fallback);
+    }
+
+    try {
+      return readJson(filePath);
+    } catch (error) {
+      throw new Error(`Corrupt JSON in ${name}.json`);
+    }
+  }
+
+  setSecret(name, value) {
+    this._assertHealthy();
+    this._assertSafeName(name);
+    const filePath = path.join(this.root, 'secrets', `${name}.bin`);
+
+    if (value === undefined) {
+      if (fs.existsSync(filePath)) {
+        fs.rmSync(filePath, { force: true });
+      }
+      return undefined;
+    }
+
+    ensureDir(path.dirname(filePath));
+    const protectedText = encodeProtected(normalizeSecretText(value));
+    fs.writeFileSync(filePath, protectedText, 'utf8');
+    return value;
+  }
+
+  getSecret(name) {
+    this._assertHealthy();
+    this._assertSafeName(name);
+    const filePath = path.join(this.root, 'secrets', `${name}.bin`);
+    if (!fs.existsSync(filePath)) {
+      return undefined;
+    }
+
+    try {
+      const secret = decodeProtected(fs.readFileSync(filePath, 'utf8'));
+      return normalizeSecretText(secret);
+    } catch {
+      throw new Error(`Corrupt secret ${name}`);
+    }
+  }
+
+  secretPresent(name) {
+    this._assertHealthy();
+    this._assertSafeName(name);
+    return fs.existsSync(path.join(this.root, 'secrets', `${name}.bin`));
+  }
+
+  _resolveRoot(stateDir) {
+    const defaultRoot = path.join(process.env.LOCALAPPDATA || os.homedir(), 'PDA', 'sdk-demo', 'state');
+    const candidate = path.resolve(stateDir || process.env.PDA_STATE_DIR || defaultRoot);
+    const repoRoot = this.repoRoot;
+
+    if (isSamePathOrDescendant(candidate, repoRoot)) {
+      throw new Error('State directory must be outside the repository');
+    }
+
+    const existingParent = deepestExistingParent(candidate);
+    if (existingParent) {
+      let realExisting;
+      try {
+        realExisting = fs.realpathSync(existingParent);
+      } catch {
+        realExisting = undefined;
+      }
+      if (realExisting && isSamePathOrDescendant(realExisting, repoRoot)) {
+        throw new Error('State directory must be outside the repository');
+      }
+    }
+
+    return candidate;
+  }
+
+  _loadOrCreateKeyPair() {
+    const hasPrivate = fs.existsSync(this._privateKeyPath);
+    const hasPublic = fs.existsSync(this._publicKeyPath);
+    const hasPersistentState = this._hasPersistentState();
+
+    if (hasPrivate !== hasPublic) {
+      throw new Error('Corrupt key pair');
+    }
+
+    if (hasPrivate && hasPublic) {
+      const privatePem = normalizePem(decodeProtected(fs.readFileSync(this._privateKeyPath, 'utf8')));
+      const publicPem = normalizePem(fs.readFileSync(this._publicKeyPath, 'utf8'));
+      this._privateKey = crypto.createPrivateKey(privatePem);
+      this._publicKey = publicPem;
+      const derivedPublic = normalizePem(crypto.createPublicKey(this._privateKey).export({ format: 'pem', type: 'spki' }).toString());
+      if (derivedPublic !== publicPem) {
+        throw new Error('Corrupt key pair');
+      }
+      return;
+    }
+
+    if (hasPersistentState) {
+      throw new Error('Missing key pair for existing storage');
+    }
+
+    const pair = crypto.generateKeyPairSync('ed25519');
+    this._privateKey = pair.privateKey;
+    this._publicKey = normalizePem(pair.publicKey.export({ format: 'pem', type: 'spki' }).toString());
+    fs.writeFileSync(this._publicKeyPath, `${this._publicKey}\n`, 'utf8');
+    fs.writeFileSync(this._privateKeyPath, encodeProtected(pair.privateKey.export({ format: 'pem', type: 'pkcs8' })), 'utf8');
+  }
+
+  _loadLedger() {
+    if (!fs.existsSync(this._ledgerPath)) {
+      return [];
+    }
+
+    const content = fs.readFileSync(this._ledgerPath, 'utf8').trim();
+    if (!content) {
+      return [];
+    }
+
+    return content.split(/\r?\n/).map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        throw new Error('Corrupt ledger file');
+      }
+    });
+  }
+
+  _verifyLedgerOrThrow() {
+    const ordered = this._loadLedger();
+    for (let index = 0; index < ordered.length; index += 1) {
+      const record = ordered[index];
+      if (record.seq !== index + 1) {
+        throw new Error('Ledger sequence mismatch');
+      }
+      const body = recordBody(record);
+      const expectedPrevious = index === 0 ? 'GENESIS' : ordered[index - 1].hash;
+      if (record.previousHash !== expectedPrevious) {
+        throw new Error('Ledger chain mismatch');
+      }
+      if (record.hash !== sha256Hex(canonicalize(body))) {
+        throw new Error('Ledger hash mismatch');
+      }
+      if (!this.verify({ payload: body, digest: record.hash, signature: record.signature, publicKey: record.publicKey, algorithm: record.algorithm, issuer: record.issuer, demo: true })) {
+        throw new Error('Ledger signature mismatch');
+      }
+    }
+
+    const checkpoint = this._loadCheckpoint();
+    const lastRecord = ordered.at(-1) ?? this._genesisCheckpoint();
+    if (checkpoint.seq !== lastRecord.seq || checkpoint.hash !== lastRecord.hash || checkpoint.previousHash !== lastRecord.previousHash) {
+      throw new Error('Ledger checkpoint mismatch');
+    }
+    if (!this.verify(checkpoint.sealed)) {
+      throw new Error('Ledger checkpoint signature mismatch');
+    }
+    this._ledger = ordered;
+  }
+
+  _genesisCheckpoint() {
+    return {
+      seq: 0,
+      id: 'checkpoint-0',
+      timestamp: new Date(0).toISOString(),
+      kind: 'checkpoint',
+      previousHash: 'GENESIS',
+      hash: 'GENESIS',
+      demoCredentials: true,
+    };
+  }
+
+  _loadCheckpoint() {
+    if (!fs.existsSync(this._checkpointPath)) {
+      throw new Error('Missing ledger checkpoint');
+    }
+
+    const checkpoint = readJson(this._checkpointPath);
+    if (!checkpoint || !checkpoint.sealed) {
+      throw new Error('Corrupt ledger checkpoint');
+    }
+
+    if (!this.verify(checkpoint.sealed)) {
+      throw new Error('Invalid ledger checkpoint signature');
+    }
+
+    const payload = checkpoint.sealed.payload;
+    return {
+      ...payload,
+      sealed: checkpoint.sealed,
+    };
+  }
+
+  _writeCheckpoint(record) {
+    const checkpointRecord = this.seal({
+      seq: record.seq,
+      id: record.id,
+      timestamp: record.timestamp,
+      kind: 'checkpoint',
+      previousHash: record.previousHash,
+      hash: record.hash,
+      demoCredentials: true,
+    });
+    atomicWriteJson(this._checkpointPath, { sealed: checkpointRecord });
+  }
+
+  _appendLedgerRecord(record) {
+    let appended = false;
+    try {
+      const serialized = `${JSON.stringify(record)}\n`;
+      const fd = fs.openSync(this._ledgerPath, 'a');
+      try {
+        fs.writeSync(fd, serialized, null, 'utf8');
+        appended = true;
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      this._writeCheckpoint(record);
+      this._verifyLedgerOrThrow();
+      this._ledger = this._loadLedger();
+    } catch (error) {
+      this._poison(error);
+      if (!appended && fs.existsSync(this._ledgerPath)) {
+        try {
+          this._ledger = this._loadLedger();
+        } catch {
+          // leave cache poisoned; disk state is authoritative
+        }
+      }
+      throw error;
+    }
+  }
+
+  _assertSafeName(name) {
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+      throw new Error('Invalid storage name');
+    }
+  }
+
+  _hasPersistentState() {
+    if (fs.existsSync(this._ledgerPath) || fs.existsSync(this._checkpointPath)) {
+      return true;
+    }
+
+    for (const fileName of ['policies.json', 'policy-draft.json', 'settings.json', 'credentials.json', 'chats.json']) {
+      if (fs.existsSync(path.join(this.root, fileName))) {
+        return true;
+      }
+    }
+
+    const secretsDir = path.join(this.root, 'secrets');
+    return fs.existsSync(secretsDir) && fs.readdirSync(secretsDir).length > 0;
+  }
+
+  _assertHealthy() {
+    if (this._poisonedError) {
+      throw this._poisonedError;
+    }
+  }
+
+  _poison(error) {
+    if (!this._poisonedError) {
+      this._poisonedError = error instanceof Error ? error : new Error(String(error));
+    }
+    return this._poisonedError;
+  }
+}

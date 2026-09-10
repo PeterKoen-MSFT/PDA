@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cumulus Granitus · Chat</title>
+    <script>
+      (() => {
+        const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+        const theme =
+          param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./chat.js"></script>
+  </head>
+  <body data-page="chat">
+    <div class="shell">
+      <header class="topbar" aria-label="Primary">
+        <div class="brand">
+          <div class="brand-mark">CG</div>
+          <div>
+            <div class="brand-name">Cumulus Granitus</div>
+            <div class="brand-note">Demo · fictional tools</div>
+          </div>
+        </div>
+        <nav class="toplinks" aria-label="Views">
+          <a href="./index.html" aria-current="page">Chat</a>
+          <a href="./admin.html">Admin</a>
+          <a href="./compliance.html">Compliance</a>
+        </nav>
+      </header>
+
+      <main class="page page--narrow">
+        <section class="panel panel--solid">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">User</p>
+              <h1>How can I help?</h1>
+              <p class="lede">Your enterprise assistant.</p>
+            </div>
+            <div id="chatBadges" class="badge-row" aria-live="polite"></div>
+          </div>
+
+          <div id="chatAlerts" class="alert-stack" aria-live="polite"></div>
+          <div id="chatTranscript" class="transcript" aria-live="polite"></div>
+
+          <form id="chatForm" class="composer">
+            <label class="sr-only" for="promptInput">Prompt</label>
+            <textarea id="promptInput" name="prompt" rows="5" placeholder="Ask about a public weather lookup, a confidential record, or a follow-up." autocomplete="off"></textarea>
+            <div class="composer-row">
+              <label class="select-wrap" for="confidentialitySelect">
+                <span>Initial confidentiality</span>
+                <select id="confidentialitySelect" name="confidentiality"></select>
+              </label>
+              <div class="composer-actions">
+                <button type="button" id="newChatButton" class="ghost new-chat">New chat</button>
+                <button type="submit" class="primary" id="sendButton">Send</button>
+              </div>
+            </div>
+          </form>
+
+          <div class="panel-foot">
+            <div id="chatMeta" class="meta"></div>
+            <div id="routeFooter" class="route-footer"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

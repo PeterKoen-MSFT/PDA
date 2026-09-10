@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cumulus Granitus · Admin</title>
+    <script>
+      (() => {
+        const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+        const theme =
+          param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./admin.js"></script>
+  </head>
+  <body data-page="admin">
+    <div class="shell">
+      <header class="topbar" aria-label="Primary">
+        <div class="brand">
+          <div class="brand-mark">CG</div>
+          <div>
+            <div class="brand-name">Cumulus Granitus</div>
+            <div class="brand-note">Demo · fictional tools</div>
+          </div>
+        </div>
+        <nav class="toplinks" aria-label="Views">
+          <a href="./index.html">Chat</a>
+          <a href="./admin.html" aria-current="page">Admin</a>
+          <a href="./compliance.html">Compliance</a>
+        </nav>
+      </header>
+
+      <main class="page page--wide">
+        <section class="panel panel--solid">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Administrator</p>
+              <h1>Enterprise policy and model settings</h1>
+              <p class="lede">Edit the constrained policy profile, publish a signed version, and keep route settings explicit. Provider acceptance is not implied.</p>
+            </div>
+            <div id="adminStatus" class="badge-row" aria-live="polite"></div>
+          </div>
+
+          <div class="tabbar" role="tablist" aria-label="Admin areas">
+            <button type="button" role="tab" aria-selected="true" data-tab-target="policies">Policies</button>
+            <button type="button" role="tab" aria-selected="false" data-tab-target="models">Models &amp; tools</button>
+            <button type="button" role="tab" aria-selected="false" data-tab-target="credentials">Credentials</button>
+          </div>
+
+          <div class="panel-body">
+            <section class="tab-panel is-active" data-tab-panel="policies">
+              <div class="section">
+                <h2>Policy draft</h2>
+                <p class="note">Edit the policy profile, vocabulary definitions, and allowlists here. Raw ODRL is saved separately and the preview comes from the backend draft.</p>
+                <div class="field-grid">
+                  <label class="field-row" for="policyName">
+                    <span class="field-label">Policy name</span>
+                    <input id="policyName" type="text" />
+                  </label>
+
+                  <div class="help-box">
+                    <div class="section-row section-row--space-between">
+                      <div>
+                        <div class="field-label">Protection levels</div>
+                        <div class="field-note">Stable ids stay canonical. Names are what users see. Base level indicates inheritance; aliases do not attest geography or country.</div>
+                      </div>
+                      <div class="button-row">
+                        <button type="button" id="addLevelButton">Add level</button>
+                      </div>
+                    </div>
+                    <table class="matrix matrix--definition" aria-label="Protection levels">
+                      <thead>
+                        <tr>
+                          <th>Stable id</th>
+                          <th>Name</th>
+                          <th>Base level</th>
+                          <th>Allowed models</th>
+                          <th>Allowed tools</th>
+                          <th>Allowed environments</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody id="policyMatrixRows"></tbody>
+                    </table>
+                  </div>
+
+                  <div class="help-box">
+                    <div class="section-row section-row--space-between">
+                      <div>
+                        <div class="field-label">Execution environments</div>
+                        <div class="field-note">Aliases can inherit from a base environment, but they are still just policy labels. The original three rows cannot be deleted.</div>
+                      </div>
+                      <div class="button-row">
+                        <button type="button" id="addEnvironmentButton">Add environment</button>
+                      </div>
+                    </div>
+                    <table class="matrix matrix--definition" aria-label="Execution environments">
+                      <thead>
+                        <tr>
+                          <th>Stable id</th>
+                          <th>Name</th>
+                          <th>Base environment</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody id="policyEnvironmentRows"></tbody>
+                    </table>
+                  </div>
+
+                  <details class="details">
+                    <summary>Advanced policy profile JSON</summary>
+                  <label class="field-row" for="policyJson">
+                    <span class="field-label">Policy profile JSON</span>
+                    <textarea id="policyJson" class="json-block" spellcheck="false"></textarea>
+                  </label>
+
+                  <div class="button-row">
+                    <button type="button" id="applyJsonButton">Apply JSON</button>
+                  </div>
+                  </details>
+
+                  <details class="details">
+                    <summary>Edit ODRL</summary>
+                    <div class="details-content">
+                      <div class="field-note">Raw ODRL is validated server-side for unknown terms before it is saved.</div>
+                      <label class="field-row" for="policyOdrl">
+                        <span class="sr-only">Raw ODRL</span>
+                        <textarea id="policyOdrl" class="json-block json-block--compact" spellcheck="false"></textarea>
+                      </label>
+                      <div class="button-row">
+                        <button type="button" id="saveOdrlButton">Save ODRL</button>
+                      </div>
+                    </div>
+                  </details>
+
+                  <details class="details">
+                    <summary>Generated ODRL · saved draft</summary>
+                    <div id="policyOdrlPreview" class="json-block json-block--readonly" aria-live="polite"></div>
+                  </details>
+
+                  <div class="button-row">
+                    <button type="button" id="saveDraftButton">Save draft</button>
+                    <button type="button" class="primary" id="publishDraftButton">Publish draft</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="section">
+                <h2>Published versions</h2>
+                <div id="policyVersions" class="list"></div>
+              </div>
+            </section>
+
+            <section class="tab-panel" data-tab-panel="models">
+              <div class="section">
+                <h2>Route settings</h2>
+                <p class="note">Copilot is Public-only, Mistral and SimpleLLM are EU-only by declaration, and Ollama is local only. Provider locations are not independently attested by this demo.</p>
+                <div id="routeSettings" class="stack"></div>
+              </div>
+
+              <div class="section">
+                <h2>Tool catalog</h2>
+                <div id="toolCatalog" class="list"></div>
+              </div>
+            </section>
+
+            <section class="tab-panel" data-tab-panel="credentials">
+              <div class="section">
+                <h2>Participant credentials</h2>
+                <p class="note">These are signed demo commitments for the policy version in force. They are not provider attestations.</p>
+                <div id="credentialList" class="list"></div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

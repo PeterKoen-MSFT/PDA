@@ -1,0 +1,23 @@
+# Generated dependencies, build outputs and runtime state belong outside the repo.
+node_modules/
+dist/
+build/
+coverage/
+bin/
+obj/
+.cache/
+*.tsbuildinfo
+*.db
+*.db-shm
+*.db-wal
+*.watermark
+
+# Local credentials must never be committed.
+.env
+.env.*
+!.env.example
+*.vault
+*.vault.*
+*.key
+*.pfx
+*.p12

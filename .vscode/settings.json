@@ -1,0 +1,11 @@
+{
+  "files.watcherExclude": {
+    "**/archive/**": true
+  },
+  "search.exclude": {
+    "archive/**": true
+  },
+  "typescript.disableAutomaticTypeAcquisition": true,
+  "js/ts.tsserver.experimental.enableProjectDiagnostics": false,
+  "git.autoRepositoryDetection": "openEditors"
+}

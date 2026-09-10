@@ -1,0 +1,1 @@
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$PSScriptRoot\server.mjs*" -or $_.Name -match '^(ollama( app)?|llama-server|ollama_llama_server)\.exe$' } | ForEach-Object { Stop-Process $_.ProcessId -Force }

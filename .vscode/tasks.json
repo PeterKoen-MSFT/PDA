@@ -1,0 +1,11 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Start demo",
+			"type": "shell",
+			"command": "${workspaceFolder}\\startdemo.ps1",
+			"problemMatcher": []
+		}
+	]
+}
