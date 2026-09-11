@@ -1,0 +1,14 @@
+.git
+.github
+node_modules
+infra
+scripts
+docs
+archive
+mockup
+*.md
+*.ps1
+inspect_edge_pages.js
+.tmp-*
+.dockerignore
+Dockerfile

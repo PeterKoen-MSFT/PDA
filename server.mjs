@@ -6,9 +6,26 @@ import path from 'node:path';
 import { AgentRunner } from './app/agent.mjs';
 import { ENVIRONMENTS, LEVELS, TOOLS, Governance } from './app/governance.mjs';
 import { Store } from './app/storage.mjs';
+import { createProtector } from './app/protector.mjs';
 
-const HOST = '127.0.0.1';
-const PORT = 8110;
+// Remote hosting (e.g. Azure Container Apps) is opt-in via PDA_ALLOW_REMOTE=1.
+// When unset the server keeps its original loopback-only behaviour unchanged.
+const ALLOW_REMOTE = process.env.PDA_ALLOW_REMOTE === '1';
+const HOST = process.env.PDA_BIND_HOST || (ALLOW_REMOTE ? '0.0.0.0' : '127.0.0.1');
+const PORT = Number(process.env.PORT || process.env.PDA_PORT || 8110);
+const PUBLIC_SCHEME = (process.env.PDA_PUBLIC_SCHEME || (ALLOW_REMOTE ? 'https' : 'http')).toLowerCase();
+// Loopback names are always allowed so the in-process SDK model proxy keeps working.
+// Extra public hostnames (the Container Apps FQDN) are added via PDA_ALLOWED_HOSTS.
+const ALLOWED_HOSTS = new Set([
+  `127.0.0.1:${PORT}`,
+  `localhost:${PORT}`,
+  ...(PORT === 80 || PORT === 443 ? ['127.0.0.1', 'localhost'] : []),
+  ...String(process.env.PDA_ALLOWED_HOSTS || '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean),
+]);
+const COOKIE_FLAGS = `HttpOnly; SameSite=Strict; Path=/${PUBLIC_SCHEME === 'https' ? '; Secure' : ''}`;
 const CAPABILITY_COOKIE = 'cg_operator_capability';
 const MAX_JSON_BYTES = 64 * 1024;
 const PROJECT_ROOT = process.cwd();
@@ -36,7 +53,7 @@ const HTML_FILES = new Map([
   ['/mockup/index.html', path.join(PROJECT_ROOT, 'mockup', 'index.html')],
 ]);
 
-const store = new Store(STATE_DIR);
+const store = new Store(STATE_DIR, { protector: await createProtector(STATE_DIR) });
 const cookieSigningKey = store.getSecret('operator-cookie-secret') || crypto.randomBytes(32).toString('hex');
 if (!store.secretPresent('operator-cookie-secret')) store.setSecret('operator-cookie-secret', cookieSigningKey);
 const CAPABILITY_SECRET = Buffer.from(cookieSigningKey, 'hex');
@@ -130,7 +147,7 @@ function hostHeader(req) {
 
 function assertAllowedHost(req) {
   const host = hostHeader(req);
-  if (host !== `${HOST}:${PORT}` && host !== `localhost:${PORT}`) {
+  if (!ALLOWED_HOSTS.has(host)) {
     throw new Error(`Unexpected Host header: ${host || '<missing>'}`);
   }
 }
@@ -138,7 +155,7 @@ function assertAllowedHost(req) {
 function assertSameOrigin(req) {
   const host = hostHeader(req);
   const origin = String(req.headers.origin || '');
-  if (!origin || origin !== `http://${host}`) {
+  if (!origin || origin !== `${PUBLIC_SCHEME}://${host}`) {
     throw new Error('Origin mismatch');
   }
   const fetchSite = String(req.headers['sec-fetch-site'] || '').toLowerCase();
@@ -397,7 +414,7 @@ function serveFile(res, filePath, { setCookieValue = null, html = false } = {}) 
     res.setHeader('x-content-type-options', 'nosniff');
   }
   if (setCookieValue) {
-    res.setHeader('set-cookie', `${CAPABILITY_COOKIE}=${encodeURIComponent(setCookieValue)}; HttpOnly; SameSite=Strict; Path=/`);
+    res.setHeader('set-cookie', `${CAPABILITY_COOKIE}=${encodeURIComponent(setCookieValue)}; ${COOKIE_FLAGS}`);
   }
   res.writeHead(200, { 'content-type': contentTypeFor(filePath) });
   res.end(body);
@@ -409,7 +426,7 @@ function setPageCookieIfNeeded(req, res) {
     return capability;
   }
   const minted = mintCapability();
-  res.setHeader('set-cookie', `${CAPABILITY_COOKIE}=${encodeURIComponent(minted.cookieValue)}; HttpOnly; SameSite=Strict; Path=/`);
+  res.setHeader('set-cookie', `${CAPABILITY_COOKIE}=${encodeURIComponent(minted.cookieValue)}; ${COOKIE_FLAGS}`);
   return minted;
 }
 
@@ -714,6 +731,11 @@ function handleStatic(req, res, parsedUrl) {
 
 const server = http.createServer(async (req, res) => {
   try {
+    // Liveness/readiness probe: no host or origin binding (probe Host may be a pod IP).
+    if ((req.url || '').split('?')[0] === '/healthz') {
+      sendJson(res, 200, { ok: true });
+      return;
+    }
     assertAllowedHost(req);
     const parsedUrl = new URL(req.url || '/', `http://${hostHeader(req) || `${HOST}:${PORT}`}`);
     const capability = parseCapability(req);

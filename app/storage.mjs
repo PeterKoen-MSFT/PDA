@@ -2,11 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
-const require = createRequire(import.meta.url);
-const DPAPI = loadDpapi();
+import { createDpapiProtector } from './protector.mjs';
 
 const PRIVATE_KEY_FILE = 'vault/signing-key.bin';
 const PUBLIC_KEY_FILE = 'vault/signing-key.public';
@@ -14,35 +12,6 @@ const LEDGER_FILE = 'ledger.jsonl';
 const CHECKPOINT_FILE = 'ledger.checkpoint.json';
 const SECRET_MAX_LENGTH = 8192;
 const MODULE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-
-function loadDpapi() {
-  if (process.platform !== 'win32') {
-    throw new Error('DPAPI is only supported on Windows');
-  }
-
-  const dependencyRoot = path.resolve(
-    process.env.PDA_DEPENDENCIES || path.join(process.env.LOCALAPPDATA || os.homedir(), 'PDA', 'sdk-demo', 'dependencies'),
-  );
-
-  let packageExports;
-  try {
-    const dependencyRequire = createRequire(path.join(dependencyRoot, 'package.json'));
-    packageExports = dependencyRequire('@primno/dpapi');
-  } catch {
-    throw new Error(`Unable to load @primno/dpapi from ${path.join(dependencyRoot, 'node_modules', '@primno', 'dpapi')}`);
-  }
-
-  if (!packageExports?.isPlatformSupported) {
-    throw new Error('DPAPI is not supported on this platform');
-  }
-
-  const bindings = packageExports.Dpapi ?? packageExports.default;
-  if (!bindings || typeof bindings.protectData !== 'function' || typeof bindings.unprotectData !== 'function') {
-    throw new Error('Unable to resolve DPAPI bindings');
-  }
-
-  return bindings;
-}
 
 function structuredCloneFallback(value) {
   if (typeof globalThis.structuredClone === 'function') {
@@ -73,26 +42,6 @@ function canonicalize(value) {
 
 function sha256Hex(text) {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
-}
-
-function base64(input) {
-  return Buffer.from(input).toString('base64');
-}
-
-function toBuffer(value) {
-  if (Buffer.isBuffer(value)) {
-    return value;
-  }
-
-  if (value instanceof Uint8Array) {
-    return Buffer.from(value);
-  }
-
-  if (typeof value === 'string') {
-    return Buffer.from(value, 'base64');
-  }
-
-  throw new Error('Unsupported binary payload');
 }
 
 function deepClone(value) {
@@ -173,22 +122,6 @@ function readJson(filePath) {
   return JSON.parse(text);
 }
 
-function encodeProtected(value) {
-  const protectedValue = DPAPI.protectData(Buffer.from(String(value), 'utf8'), null, 'CurrentUser');
-  return base64(toBuffer(protectedValue));
-}
-
-function decodeProtected(value) {
-  const decrypted = DPAPI.unprotectData(toBuffer(value), null, 'CurrentUser');
-  const text = Buffer.from(decrypted).toString('utf8');
-  try {
-    const parsed = JSON.parse(text);
-    return typeof parsed === 'string' ? parsed : text;
-  } catch {
-    return text;
-  }
-}
-
 function recordBody(entry) {
   const { hash, signature, publicKey, algorithm, issuer, ...body } = entry;
   return body;
@@ -199,9 +132,10 @@ function sortLedgerRecords(records) {
 }
 
 export class Store {
-  constructor(stateDir) {
+  constructor(stateDir, options = {}) {
     this.repoRoot = findRepoRoot();
     this.root = this._resolveRoot(stateDir);
+    this._protector = options.protector || createDpapiProtector();
     this._ledgerPath = path.join(this.root, LEDGER_FILE);
     this._checkpointPath = path.join(this.root, CHECKPOINT_FILE);
     this._privateKeyPath = path.join(this.root, PRIVATE_KEY_FILE);
@@ -366,7 +300,7 @@ export class Store {
     }
 
     ensureDir(path.dirname(filePath));
-    const protectedText = encodeProtected(normalizeSecretText(value));
+    const protectedText = this._protector.protect(normalizeSecretText(value));
     fs.writeFileSync(filePath, protectedText, 'utf8');
     return value;
   }
@@ -380,7 +314,7 @@ export class Store {
     }
 
     try {
-      const secret = decodeProtected(fs.readFileSync(filePath, 'utf8'));
+      const secret = this._protector.unprotect(fs.readFileSync(filePath, 'utf8'));
       return normalizeSecretText(secret);
     } catch {
       throw new Error(`Corrupt secret ${name}`);
@@ -428,7 +362,7 @@ export class Store {
     }
 
     if (hasPrivate && hasPublic) {
-      const privatePem = normalizePem(decodeProtected(fs.readFileSync(this._privateKeyPath, 'utf8')));
+      const privatePem = normalizePem(this._protector.unprotect(fs.readFileSync(this._privateKeyPath, 'utf8')));
       const publicPem = normalizePem(fs.readFileSync(this._publicKeyPath, 'utf8'));
       this._privateKey = crypto.createPrivateKey(privatePem);
       this._publicKey = publicPem;
@@ -447,7 +381,7 @@ export class Store {
     this._privateKey = pair.privateKey;
     this._publicKey = normalizePem(pair.publicKey.export({ format: 'pem', type: 'spki' }).toString());
     fs.writeFileSync(this._publicKeyPath, `${this._publicKey}\n`, 'utf8');
-    fs.writeFileSync(this._privateKeyPath, encodeProtected(pair.privateKey.export({ format: 'pem', type: 'pkcs8' })), 'utf8');
+    fs.writeFileSync(this._privateKeyPath, this._protector.protect(pair.privateKey.export({ format: 'pem', type: 'pkcs8' })), 'utf8');
   }
 
   _loadLedger() {
