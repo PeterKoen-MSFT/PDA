@@ -44,6 +44,25 @@ param immutabilityDays int = 365
 @description('Emit a non-authoritative OpenTelemetry mirror of ledger appends to Application Insights.')
 param enableOpenTelemetry bool = true
 
+@description('Provision an Azure OpenAI (AI Foundry) account + deployment to serve the cloud Public route via managed identity.')
+param deployAzureOpenAI bool = false
+
+@description('Existing Azure OpenAI v1 endpoint to use instead of provisioning one (e.g. https://<res>.openai.azure.com/openai/v1). Ignored when deployAzureOpenAI is true.')
+param azureOpenAiEndpoint string = ''
+
+@description('Model deployment name the Public route targets.')
+param azureOpenAiDeployment string = 'gpt-4o-mini'
+
+@description('Model name deployed when deployAzureOpenAI is true.')
+param azureOpenAiModel string = 'gpt-4o-mini'
+
+@description('Model version deployed when deployAzureOpenAI is true.')
+param azureOpenAiModelVersion string = '2024-07-18'
+
+@description('Tokens-per-minute capacity (thousands) for the model deployment.')
+@minValue(1)
+param azureOpenAiCapacity int = 10
+
 @description('Optional object ID of the CI/CD deploying principal. When set it is granted data-plane roles needed to seed Key Vault secrets.')
 param deployerPrincipalId string = ''
 
@@ -68,6 +87,7 @@ var ollamaShareName = 'ollama-models'
 var archiveContainerName = 'compliance-archive'
 var consumptionProfileName = 'Consumption'
 var gpuProfileName = 'gpu'
+var azureAccountName = take(toLower(replace('${namePrefix}aoai${suffix}', '-', '')), 63)
 
 // -------------------------------------------------------------------------------------------------
 // Identity
@@ -239,6 +259,47 @@ resource archiveImmutability 'Microsoft.Storage/storageAccounts/blobServices/con
     storage
   ]
 }
+
+// -------------------------------------------------------------------------------------------------
+// Azure OpenAI / AI Foundry — cloud Public route, managed-identity (AAD) auth only
+// -------------------------------------------------------------------------------------------------
+module azureOpenAi 'br/public:avm/res/cognitive-services/account:0.19.0' = if (deployAzureOpenAI) {
+  name: 'azureOpenAi'
+  params: {
+    name: azureAccountName
+    location: location
+    tags: tags
+    kind: 'OpenAI'
+    sku: 'S0'
+    customSubDomainName: azureAccountName
+    disableLocalAuth: true
+    publicNetworkAccess: 'Enabled'
+    deployments: [
+      {
+        name: azureOpenAiDeployment
+        model: {
+          format: 'OpenAI'
+          name: azureOpenAiModel
+          version: azureOpenAiModelVersion
+        }
+        sku: {
+          name: 'Standard'
+          capacity: azureOpenAiCapacity
+        }
+      }
+    ]
+    roleAssignments: [
+      {
+        principalId: identity.outputs.principalId
+        principalType: 'ServicePrincipal'
+        roleDefinitionIdOrName: 'Cognitive Services OpenAI User'
+      }
+    ]
+  }
+}
+
+var azureEnabled = deployAzureOpenAI || !empty(azureOpenAiEndpoint)
+var azureEndpointEffective = deployAzureOpenAI ? '${azureOpenAi!.outputs.endpoint}openai/v1' : azureOpenAiEndpoint
 
 // -------------------------------------------------------------------------------------------------
 // Container Apps managed environment
@@ -421,6 +482,30 @@ var baseEnv = [
   }
 ]
 
+var webEnv = concat(
+  baseEnv,
+  deployOllama ? [
+    {
+      name: 'PDA_OLLAMA_BASE'
+      value: ollamaBase
+    }
+  ] : [],
+  azureEnabled ? [
+    {
+      name: 'AZURE_OPENAI_ENDPOINT'
+      value: azureEndpointEffective
+    }
+    {
+      name: 'AZURE_OPENAI_DEPLOYMENT'
+      value: azureOpenAiDeployment
+    }
+    {
+      name: 'PDA_PUBLIC_ROUTE'
+      value: 'azure'
+    }
+  ] : []
+)
+
 module webApp 'br/public:avm/res/app/container-app:0.23.0' = {
   name: 'webApp'
   params: {
@@ -464,12 +549,7 @@ module webApp 'br/public:avm/res/app/container-app:0.23.0' = {
           cpu: 1
           memory: '2Gi'
         }
-        env: deployOllama ? concat(baseEnv, [
-          {
-            name: 'PDA_OLLAMA_BASE'
-            value: ollamaBase
-          }
-        ]) : baseEnv
+        env: webEnv
         volumeMounts: [
           {
             volumeName: 'state'
@@ -527,3 +607,6 @@ output webAppName string = webApp.outputs.name
 
 @description('Storage account name backing state and the compliance archive.')
 output storageAccountName string = storage.outputs.name
+
+@description('Azure OpenAI v1 endpoint serving the cloud Public route, if configured.')
+output azureOpenAiEndpoint string = azureEnabled ? azureEndpointEffective : ''

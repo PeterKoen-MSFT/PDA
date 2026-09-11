@@ -26,8 +26,8 @@ A single resource-group deployment ([infra/main.bicep](../infra/main.bicep)) cre
 Log Analytics, Application Insights, a user-assigned managed identity, Container
 Registry, Key Vault (with an RSA KEK), a Storage account (SMB state share + immutable
 compliance archive), a Container Apps environment, the web app, and — optionally — the
-serverless-GPU Ollama route. See [azure-architecture.md](azure-architecture.md) for the
-full picture.
+serverless-GPU Ollama route and an Azure OpenAI (AI Foundry) account for the cloud
+Public route. See [azure-architecture.md](azure-architecture.md) for the full picture.
 
 Pipeline stages ([.github/workflows/deploy.yml](../.github/workflows/deploy.yml)):
 
@@ -123,6 +123,10 @@ Variables:
 | `PDA_DEPLOY_OLLAMA` | `true` / `false` | Toggle the GPU route |
 | `PDA_OLLAMA_MODEL` | `llama3.1` | Model pulled on start |
 | `PDA_OLLAMA_PROFILE` | `Consumption-GPU-NC8as-T4` | Must match available GPU quota |
+| `PDA_DEPLOY_AZURE_OPENAI` | `true` / `false` | Provision Azure OpenAI for the cloud Public route |
+| `PDA_AZURE_OPENAI_ENDPOINT` | *(v1 endpoint)* | Use an existing Azure OpenAI instead of provisioning |
+| `PDA_AZURE_OPENAI_DEPLOYMENT` | `gpt-4o-mini` | Deployment name the Public route targets |
+| `PDA_AZURE_OPENAI_MODEL` | `gpt-4o-mini` | Model to deploy when provisioning |
 | `DEPLOYER_PRINCIPAL_ID` | *(SP object ID)* | Optional; grants KV Secrets Officer |
 
 ## 4. Deploy via GitHub Actions
@@ -144,8 +148,9 @@ Variables:
 5. The **sovereign / highly confidential** route uses the internal Ollama app; the
    first turn may be slower while the model finishes pulling.
 
-> The Public → Copilot route is not usable in Container Apps (no interactive Copilot
-> CLI sign-in). Demonstrate governance with the EU and sovereign routes.
+> The **cloud Public route** is served by **Azure OpenAI via the managed identity**
+> when `PDA_DEPLOY_AZURE_OPENAI=true` (or an existing `PDA_AZURE_OPENAI_ENDPOINT` is
+> supplied) — no keys and no interactive sign-in. The Copilot route remains local-only.
 
 ## Manual / local deployment
 
@@ -191,6 +196,10 @@ Environment variables read by the deployment scripts
 | `PDA_DEPLOY_OLLAMA` | no | `true` | Deploy the GPU route |
 | `PDA_OLLAMA_MODEL` | no | `llama3.1` | Ollama model |
 | `PDA_OLLAMA_PROFILE` | no | `Consumption-GPU-NC8as-T4` | GPU workload profile |
+| `PDA_DEPLOY_AZURE_OPENAI` | no | `false` | Provision Azure OpenAI for the Public route |
+| `PDA_AZURE_OPENAI_ENDPOINT` | no | — | Existing Azure OpenAI v1 endpoint (instead of provisioning) |
+| `PDA_AZURE_OPENAI_DEPLOYMENT` | no | `gpt-4o-mini` | Deployment name for the Public route |
+| `PDA_AZURE_OPENAI_MODEL` | no | `gpt-4o-mini` | Model to deploy when provisioning |
 | `DEPLOYER_PRINCIPAL_ID` | no | — | Grants KV Secrets Officer to the deployer |
 | `PDA_WEB_IMAGE` | no | derived | Full image ref (set from the build step) |
 
@@ -217,5 +226,6 @@ locally:
 | Login step fails (`AADSTS700...`) | Federated subject mismatch | Ensure the federated credential subject matches the run (environment/branch) |
 | Template role-assignment error | Deployer lacks `User Access Administrator` | Grant it at the deployment scope |
 | Web app unhealthy after deploy | Image not built / wrong port | Confirm `Build-And-PushImage` ran; probe path is `/healthz` on `8110` |
-| Public route errors in cloud | Copilot CLI sign-in unavailable | Use EU/sovereign routes; configure in Admin |
+| Public route errors in cloud | Copilot selected but no cloud model | Set `PDA_DEPLOY_AZURE_OPENAI=true` (or `PDA_AZURE_OPENAI_ENDPOINT`) so Public uses Azure OpenAI |
+| Azure OpenAI 401/403 | UAMI missing role or AAD-only auth | Ensure `Cognitive Services OpenAI User` on the account; provisioning sets it automatically |
 | App can't unwrap the data key | UAMI missing KV Crypto User or wrong `AZURE_KEY_VAULT_URI` | Verify role assignment and env vars on the container app |

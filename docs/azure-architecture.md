@@ -26,6 +26,7 @@ Infrastructure as Code (Bicep + Azure Verified Modules).
 | Component | Azure service | Purpose |
 | --- | --- | --- |
 | Web app (governance agent) | Azure Container Apps (Consumption profile) | Serves the chat/Admin/Compliance UI and the governed agent loop |
+| Cloud Public model route | Azure OpenAI / AI Foundry | Serves the Public route via **managed identity** (no key, no personal sign-in) |
 | Sovereign model route | Azure Container Apps (serverless GPU profile) | Runs Ollama for the on-premises / highly confidential route, internal ingress only |
 | At-rest key material | Azure Key Vault | RSA key-encryption key (KEK) that wraps the app data-encryption key |
 | Live state | Azure Storage — Azure Files (SMB) | Persists signing key, ledger, checkpoint and secrets across revisions |
@@ -53,9 +54,10 @@ flowchart TB
         uami{{User-assigned<br/>managed identity}}
         logs[(Log Analytics)]
         appi[(Application Insights)]
+        aoai[[Azure OpenAI / AI Foundry<br/>Public route · managed identity]]
     end
 
-    ext1[[GitHub Copilot SDK route]]
+    ext1[[GitHub Copilot SDK route<br/>local-only]]
     ext2[[Mistral / SimpleLLM EU routes]]
 
     user -->|HTTPS| web
@@ -63,8 +65,9 @@ flowchart TB
     web -->|mount /state| files
     web -->|archive evidence| blob
     web -->|governed sovereign route| ollama
+    web -->|governed Public route| aoai
     web -.->|governed EU routes| ext2
-    web -.->|Public route*| ext1
+    web -.->|Public route (local only)*| ext1
     web -->|pull image| acr
     ollama -->|pull image| acr
     web --> appi
@@ -74,13 +77,16 @@ flowchart TB
     uami -.-> acr
     uami -.-> files
     uami -.-> blob
+    uami -.->|AAD token| aoai
 
     classDef ext stroke-dasharray: 4 3;
     class ext1,ext2 ext;
 ```
 
 `*` The Public → Copilot route requires an interactive Copilot CLI sign-in that is not
-available inside Container Apps. See [limitations](#design-decisions-and-honest-limitations).
+available inside Container Apps, so in the cloud the Public route is served by **Azure
+OpenAI via managed identity**. Copilot remains a local-only route. See
+[limitations](#design-decisions-and-honest-limitations).
 
 ## Request and inference flow
 
@@ -160,6 +166,7 @@ Role assignments (provisioned via AVM `roleAssignments`):
 | Key Vault | Key Vault Secrets User | read any future KV-sourced secrets |
 | Container Registry | AcrPull | pull the web/ollama images |
 | Storage account | Storage Blob Data Contributor | write to the compliance archive |
+| Azure OpenAI | Cognitive Services OpenAI User | call the Public-route model with the managed identity |
 | Key Vault | Key Vault Secrets Officer | *(optional)* granted to the CI principal when `deployerPrincipalId` is supplied |
 
 `AZURE_CLIENT_ID` is set on the web app so `DefaultAzureCredential` selects this
@@ -214,14 +221,19 @@ Environment variables consumed by the app (set on the web container by Bicep):
 | `PDA_INTERNAL_BASE` | `http://127.0.0.1:8110` | same | Base for the in-process model proxy |
 | `PDA_OTEL_ENABLED` | unset | `1` | Emit the non-authoritative OpenTelemetry ledger mirror |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | — | AI connection string | Telemetry export target |
+| `PDA_PUBLIC_ROUTE` | `copilot` | `azure` | Which route serves the Public level by default |
+| `AZURE_OPENAI_ENDPOINT` | — | AOAI v1 endpoint | Azure OpenAI base URL for the Public route |
+| `AZURE_OPENAI_DEPLOYMENT` | `gpt-4o-mini` | deployment name | Model deployment used as the route model |
 
 With none of these set, the app runs exactly as the original local demo.
 
 ## Design decisions and honest limitations
 
 - **Copilot route in cloud**: the Public → Copilot route needs an interactive Copilot
-  CLI sign-in that Container Apps cannot provide. In Azure, use the sovereign (Ollama)
-  and EU (Mistral/SimpleLLM) routes; configure route/model preferences in Admin.
+  CLI sign-in that Container Apps cannot provide. In Azure the Public route is served
+  by **Azure OpenAI via the managed identity** (set `PDA_PUBLIC_ROUTE=azure` with an
+  `AZURE_OPENAI_ENDPOINT`); Copilot remains a local-only route. The Azure OpenAI
+  account uses AAD-only auth (`disableLocalAuth: true`) — no keys are stored.
 - **Serverless GPU**: the Ollama profile requires GPU quota and regional availability.
   The chosen profile type and the container CPU/memory must be compatible or the
   deployment fails. GPU is optional (`deployOllama = false` removes it).

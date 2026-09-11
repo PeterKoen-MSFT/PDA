@@ -36,16 +36,20 @@ const BASE_LEVEL_RANK = new Map(LEVELS.map((level, index) => [level, index]));
 const BASE_ENVIRONMENT_RANK = new Map(ENVIRONMENTS.map((environment, index) => [environment, index]));
 const EU_POOL_ROUTE_IDS = ['simplellm'];
 const REMOTE_ROUTE_IDS = ['mistral', ...EU_POOL_ROUTE_IDS];
-const ROUTE_IDS = new Set(['copilot', 'ollama', ...REMOTE_ROUTE_IDS]);
+const ROUTE_IDS = new Set(['copilot', 'ollama', 'azure', ...REMOTE_ROUTE_IDS]);
 const DEFAULT_PUBLIC_ENDPOINT = 'https://api.githubcopilot.com/v1';
 const DEFAULT_MISTRAL_ENDPOINT = 'https://api.mistral.ai/v1';
 const DEFAULT_OLLAMA_ENDPOINT = process.env.PDA_OLLAMA_BASE || 'http://127.0.0.1:11434/v1';
 const DEFAULT_SIMPLELLM_ENDPOINT = 'https://api.simplellm.eu/v1';
+// Azure OpenAI / AI Foundry OpenAI-compatible v1 endpoint. Authenticated with the
+// app's managed identity (no API key). Empty locally, set by the container.
+const DEFAULT_AZURE_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT || '';
 const CREDENTIAL_ISSUER = 'CG Demo Credential Authority';
 const CREDENTIAL_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PARTICIPANTS = [
   { id: 'copilot', label: 'GitHub Copilot', kind: 'model' },
   { id: 'ollama', label: 'Ollama', kind: 'model' },
+  { id: 'azure', label: 'Azure OpenAI', kind: 'model' },
   { id: 'mistral', label: 'Mistral', kind: 'model' },
   { id: 'simplellm', label: 'SimpleLLM', kind: 'model' },
   { id: 'weather', label: 'Weather tool', kind: 'tool' },
@@ -1272,7 +1276,7 @@ export class Governance {
     const levelDefinitions = this._createDefaultLevelDefinitions();
     const environmentDefinitions = this._createDefaultEnvironmentDefinitions();
     const allowedModels = {
-      Public: ['copilot', 'mistral', 'simplellm', 'ollama'],
+      Public: ['copilot', 'azure', 'mistral', 'simplellm', 'ollama'],
       Internal: ['mistral', 'simplellm', 'ollama'],
       'Highly Confidential': ['ollama'],
     };
@@ -1575,6 +1579,16 @@ export class Governance {
           geography: 'On-premises',
           costScore: 0,
         },
+        azure: {
+          id: 'azure',
+          kind: 'azure',
+          name: 'Azure OpenAI',
+          enabled: Boolean(DEFAULT_AZURE_ENDPOINT),
+          model: process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-4o-mini',
+          baseUrl: DEFAULT_AZURE_ENDPOINT || 'https://azure-openai.invalid/openai/v1',
+          geography: process.env.PDA_AZURE_GEOGRAPHY || 'Public cloud',
+          costScore: 0,
+        },
         mistral: {
           id: 'mistral',
           kind: 'mistral',
@@ -1597,7 +1611,7 @@ export class Governance {
         },
       },
       preferences: {
-        public: 'copilot',
+        public: process.env.PDA_PUBLIC_ROUTE || 'copilot',
         internal: 'ollama',
         high: 'ollama',
       },
@@ -1948,6 +1962,20 @@ export class Governance {
     }
     if (routeId === 'ollama' && value !== DEFAULT_OLLAMA_ENDPOINT) {
       throw new Error('Ollama endpoint must remain loopback only');
+    }
+    if (routeId === 'azure') {
+      let url;
+      try {
+        url = new URL(value);
+      } catch {
+        throw new Error('Azure OpenAI endpoint must be a valid URL');
+      }
+      if (url.protocol !== 'https:') {
+        throw new Error('Azure OpenAI endpoint must use https');
+      }
+      if (DEFAULT_AZURE_ENDPOINT && value !== DEFAULT_AZURE_ENDPOINT) {
+        throw new Error('Azure OpenAI endpoint must match the configured endpoint');
+      }
     }
     if (routeId === 'mistral' && value !== DEFAULT_MISTRAL_ENDPOINT) {
       throw new Error('Mistral endpoint must remain the declared demo endpoint');

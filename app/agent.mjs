@@ -10,6 +10,9 @@ const dependencies = process.env.PDA_DEPENDENCIES || path.join(process.env.LOCAL
 const OLLAMA_BASE = process.env.PDA_OLLAMA_BASE || 'http://127.0.0.1:11434/v1';
 const OLLAMA_TAGS_URL = `${OLLAMA_BASE.replace(/\/v1\/?$/, '')}/api/tags`;
 const INTERNAL_BASE = process.env.PDA_INTERNAL_BASE || `http://127.0.0.1:${process.env.PORT || process.env.PDA_PORT || 8110}`;
+// Copilot CLI credential home. USERPROFILE is undefined on Linux; fall back gracefully.
+const copilotHome = () => process.env.PDA_COPILOT_HOME
+  || (process.env.USERPROFILE ? path.join(process.env.USERPROFILE, '.copilot') : path.join(process.env.HOME || process.cwd(), '.copilot'));
 const failure = (code, message) => Object.assign(new Error(message), { code });
 const bounded = async (response, limit = 2 * 1024 * 1024) => {
   let size = 0; const chunks = [];
@@ -25,6 +28,7 @@ export class AgentRunner {
   constructor(governance, store) {
     this.governance = governance; this.store = store;
     this.activeRun = null; this.readiness = {}; this.sdk = null;
+    this._azureToken = null; this._azureCredential = null;
     this.work = path.join(store.root, 'runtime-work');
     fs.mkdirSync(this.work, { recursive: true });
   }
@@ -49,7 +53,7 @@ export class AgentRunner {
     for (const key of Object.keys(env)) if (/MISTRAL|SIMPLELLM|PDA_OPERATOR|AZURE.*KEY|OPENAI.*KEY/i.test(key)) delete env[key];
     const client = new CopilotClient({ mode: 'empty', workingDirectory: this.work,
       useLoggedInUser: route.kind === 'copilot',
-      baseDirectory: route.kind === 'copilot' ? path.join(process.env.USERPROFILE, '.copilot') : path.join(this.store.root, 'byok-runtime'),
+      baseDirectory: route.kind === 'copilot' ? copilotHome() : path.join(this.store.root, 'byok-runtime'),
       logLevel: 'error', env });
     let timer;
     try {
@@ -60,6 +64,22 @@ export class AgentRunner {
   }
   isRemoteRoute(route) { return route?.kind !== 'copilot' && route?.kind !== 'ollama'; }
   providerKey(route) { return this.isRemoteRoute(route) ? this.store.getSecret(`${route.id}-api-key`) : null; }
+  requiresStaticKey(route) { return this.isRemoteRoute(route) && route?.kind !== 'azure'; }
+  async azureBearer() {
+    if (this._azureToken && this._azureToken.expiresOnTimestamp - 60_000 > Date.now()) return this._azureToken.token;
+    const { DefaultAzureCredential } = await import('@azure/identity');
+    this._azureCredential ??= new DefaultAzureCredential();
+    const scope = process.env.AZURE_OPENAI_SCOPE || 'https://cognitiveservices.azure.com/.default';
+    const token = await this._azureCredential.getToken(scope);
+    if (!token?.token) throw failure('azure_token_failed', 'Could not obtain a managed-identity token for Azure OpenAI.');
+    this._azureToken = token;
+    return token.token;
+  }
+  async authHeaderFor(route) {
+    if (route?.kind === 'azure') return { Authorization: `Bearer ${await this.azureBearer()}` };
+    const key = this.providerKey(route);
+    return key ? { Authorization: `Bearer ${key}` } : {};
+  }
   providerFailure(route, status, raw) {
     if (status === 401 || status === 403) return `${route.name} rejected its configured credential (${status}).`;
     if (status === 402) return `${route.name} reports that its free allowance or credit is unavailable (HTTP 402).`;
@@ -87,10 +107,9 @@ export class AgentRunner {
           models = (await client.listModels()).map(m => ({ id: m.id, name: m.name }));
         } finally { await client.forceStop(); }
       } else {
-        const key = this.providerKey(route);
-        if (this.isRemoteRoute(route) && !key) throw failure('provider_key_required', `Enter the ${route.name} API key in Admin first.`);
+        if (this.requiresStaticKey(route) && !this.providerKey(route)) throw failure('provider_key_required', `Enter the ${route.name} API key in Admin first.`);
         const url = id === 'ollama' ? OLLAMA_TAGS_URL : route.baseUrl + '/models';
-        const response = await fetch(url, { headers: key ? { Authorization: `Bearer ${key}` } : {}, redirect: 'error', signal: AbortSignal.timeout(15000) });
+        const response = await fetch(url, { headers: await this.authHeaderFor(route), redirect: 'error', signal: AbortSignal.timeout(15000) });
         if (!response.ok) throw failure('provider_probe_failed', `Provider rejected model discovery (${response.status}).`);
         const body = JSON.parse(await bounded(response));
         models = id === 'ollama' ? body.models.map(m => ({ id: m.name })) : body.data.map(m => ({ id: m.id }));
@@ -246,9 +265,8 @@ export class AgentRunner {
         this.event('model-egress-authorized', run.chat, { routeId: route.id, model: route.model,
           requestDigest: crypto.createHash('sha256').update(serialized).digest('hex'), credential: acceptance.record,
           routingStrategy: routePlan.strategy, routeAttempt: index + 1, costScore: route.costScore });
-        const key = this.providerKey(route);
-        if (this.isRemoteRoute(route) && !key) throw failure('provider_key_required', `${route.name} key is missing.`);
-        const headers = { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) };
+        if (this.requiresStaticKey(route) && !this.providerKey(route)) throw failure('provider_key_required', `${route.name} key is missing.`);
+        const headers = { 'Content-Type': 'application/json', ...(await this.authHeaderFor(route)) };
         let text;
         let reason;
         let failureCode;

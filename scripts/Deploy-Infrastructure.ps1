@@ -28,6 +28,15 @@ $parameters = @(
 if (-not [string]::IsNullOrWhiteSpace($config.DeployerPrincipalId)) {
     $parameters += "deployerPrincipalId=$($config.DeployerPrincipalId)"
 }
+if ($config.DeployAzureOpenAI -eq 'true') {
+    $parameters += "deployAzureOpenAI=true"
+    $parameters += "azureOpenAiModel=$($config.AzureOpenAiModel)"
+    $parameters += "azureOpenAiDeployment=$($config.AzureOpenAiDeployment)"
+}
+elseif (-not [string]::IsNullOrWhiteSpace($config.AzureOpenAiEndpoint)) {
+    $parameters += "azureOpenAiEndpoint=$($config.AzureOpenAiEndpoint)"
+    $parameters += "azureOpenAiDeployment=$($config.AzureOpenAiDeployment)"
+}
 
 Write-Step "Deploying $deploymentName to $($config.ResourceGroup)"
 $outputJson = Invoke-Az deployment group create `

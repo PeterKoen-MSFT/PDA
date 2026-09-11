@@ -76,6 +76,10 @@ function Get-PdaConfig {
         DeployOllama        = Get-OptionalEnv 'PDA_DEPLOY_OLLAMA' 'true'
         OllamaModel         = Get-OptionalEnv 'PDA_OLLAMA_MODEL' 'llama3.1'
         OllamaProfileType   = Get-OptionalEnv 'PDA_OLLAMA_PROFILE' 'Consumption-GPU-NC8as-T4'
+        DeployAzureOpenAI   = Get-OptionalEnv 'PDA_DEPLOY_AZURE_OPENAI' 'false'
+        AzureOpenAiEndpoint = Get-OptionalEnv 'PDA_AZURE_OPENAI_ENDPOINT' ''
+        AzureOpenAiDeployment = Get-OptionalEnv 'PDA_AZURE_OPENAI_DEPLOYMENT' 'gpt-4o-mini'
+        AzureOpenAiModel    = Get-OptionalEnv 'PDA_AZURE_OPENAI_MODEL' 'gpt-4o-mini'
         DeployerPrincipalId = Get-OptionalEnv 'DEPLOYER_PRINCIPAL_ID' ''
         RepoRoot            = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
     }
