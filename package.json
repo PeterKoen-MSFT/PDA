@@ -13,7 +13,9 @@
   "dependencies": {
     "@azure/identity": "4.5.0",
     "@azure/keyvault-keys": "4.9.0",
-    "@github/copilot-sdk": "1.0.13"
+    "@azure/monitor-opentelemetry": "1.8.0",
+    "@github/copilot-sdk": "1.0.13",
+    "@opentelemetry/api-logs": "0.54.0"
   },
   "optionalDependencies": {
     "@primno/dpapi": "2.0.1"

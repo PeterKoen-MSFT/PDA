@@ -133,6 +133,22 @@ sequenceDiagram
   stronger than the application hash chain alone.
 - Blob **versioning**, **change feed** and **soft-delete** are enabled for recovery.
 
+## Ledger observability (OpenTelemetry)
+
+The signed append-only ledger is the **system of record**. When `PDA_OTEL_ENABLED=1`
+(default in cloud, off locally), each ledger append is also emitted as an
+**OpenTelemetry log record** to Application Insights via `app/telemetry.mjs` — a
+**non-authoritative mirror** for dashboards, alerting and trace correlation.
+
+- The mirror is best-effort and is wired through an optional `onAppend` hook on the
+  store; a telemetry failure can never break or slow the ledger.
+- Only an explicit **allow-list** of non-sensitive fields is exported (`seq`, `kind`,
+  `digest`, `previousHash`, `routeId`, `outcome`, `level`, `sovereignty`,
+  `policyVersion`, ...). Signatures, secrets, prompts, tool arguments/results and
+  credentials are never sent.
+- Compliance is verified from the ledger (`verifyLedger()`); OpenTelemetry is for
+  monitoring only.
+
 ## Identity and access
 
 A single **user-assigned managed identity** is attached to both container apps.
@@ -196,6 +212,8 @@ Environment variables consumed by the app (set on the web container by Bicep):
 | `PDA_ALLOWED_HOSTS` | — | web FQDN | Extra hostnames accepted in the `Host` header |
 | `PDA_OLLAMA_BASE` | loopback | internal Ollama URL | Sovereign route endpoint |
 | `PDA_INTERNAL_BASE` | `http://127.0.0.1:8110` | same | Base for the in-process model proxy |
+| `PDA_OTEL_ENABLED` | unset | `1` | Emit the non-authoritative OpenTelemetry ledger mirror |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING` | — | AI connection string | Telemetry export target |
 
 With none of these set, the app runs exactly as the original local demo.
 

@@ -41,6 +41,9 @@ param kekName string = 'pda-kek'
 @minValue(1)
 param immutabilityDays int = 365
 
+@description('Emit a non-authoritative OpenTelemetry mirror of ledger appends to Application Insights.')
+param enableOpenTelemetry bool = true
+
 @description('Optional object ID of the CI/CD deploying principal. When set it is granted data-plane roles needed to seed Key Vault secrets.')
 param deployerPrincipalId string = ''
 
@@ -411,6 +414,10 @@ var baseEnv = [
   {
     name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
     value: appInsights.outputs.connectionString
+  }
+  {
+    name: 'PDA_OTEL_ENABLED'
+    value: enableOpenTelemetry ? '1' : '0'
   }
 ]
 

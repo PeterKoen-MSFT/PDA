@@ -136,6 +136,8 @@ export class Store {
     this.repoRoot = findRepoRoot();
     this.root = this._resolveRoot(stateDir);
     this._protector = options.protector || createDpapiProtector();
+    // Optional, non-authoritative mirror of ledger appends (e.g. OpenTelemetry). Never load-bearing.
+    this._onAppend = typeof options.onAppend === 'function' ? options.onAppend : null;
     this._ledgerPath = path.join(this.root, LEDGER_FILE);
     this._checkpointPath = path.join(this.root, CHECKPOINT_FILE);
     this._privateKeyPath = path.join(this.root, PRIVATE_KEY_FILE);
@@ -236,6 +238,13 @@ export class Store {
     };
 
     this._appendLedgerRecord(record);
+    if (this._onAppend) {
+      try {
+        this._onAppend(record);
+      } catch {
+        // A telemetry mirror must never break or slow the authoritative ledger.
+      }
+    }
     return record;
   }
 

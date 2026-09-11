@@ -7,6 +7,7 @@ import { AgentRunner } from './app/agent.mjs';
 import { ENVIRONMENTS, LEVELS, TOOLS, Governance } from './app/governance.mjs';
 import { Store } from './app/storage.mjs';
 import { createProtector } from './app/protector.mjs';
+import { initTelemetry } from './app/telemetry.mjs';
 
 // Remote hosting (e.g. Azure Container Apps) is opt-in via PDA_ALLOW_REMOTE=1.
 // When unset the server keeps its original loopback-only behaviour unchanged.
@@ -53,7 +54,8 @@ const HTML_FILES = new Map([
   ['/mockup/index.html', path.join(PROJECT_ROOT, 'mockup', 'index.html')],
 ]);
 
-const store = new Store(STATE_DIR, { protector: await createProtector(STATE_DIR) });
+const telemetry = await initTelemetry();
+const store = new Store(STATE_DIR, { protector: await createProtector(STATE_DIR), onAppend: telemetry.onLedgerAppend });
 const cookieSigningKey = store.getSecret('operator-cookie-secret') || crypto.randomBytes(32).toString('hex');
 if (!store.secretPresent('operator-cookie-secret')) store.setSecret('operator-cookie-secret', cookieSigningKey);
 const CAPABILITY_SECRET = Buffer.from(cookieSigningKey, 'hex');
