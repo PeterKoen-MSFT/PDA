@@ -1,12 +1,20 @@
 # Demo test prompts
 
+Requires Node 22.12 or later, the published Copilot SDK 1.0.13 and its platform
+runtime, Windows DPAPI dependencies, and a configured Ollama model. Dependencies
+remain under the external demo dependency directory, not in the repository.
+These are local walkthrough expectations, not validation of the Azure deployment.
+
 Start:
 
 ```powershell
 .\startdemo.ps1
 ```
 
-This starts Ollama and the Node server. The server loads the agent.
+This reuses Ollama on port 11434 or starts it, then starts the Node server on 8110.
+An occupied demo port is rejected. The server takes an exclusive state lock before
+loading the agent. After an abnormal exit, verify the old process is stopped before
+an authorized operator removes a stale `writer.lock`.
 
 Open <http://127.0.0.1:8110/> and run these prompts in order.
 
@@ -20,6 +28,11 @@ Default routing remains **Public → Copilot** and **Highly Confidential / On-pr
 4. Set **Internal model preference** to Mistral or SimpleLLM.
 
 The fixed OpenAI-compatible routes are Mistral `https://api.mistral.ai/v1` and SimpleLLM `https://api.simplellm.eu/v1`. Their EU locations are provider declarations, not independently attested execution evidence. Probing discovers the configured model but does not prove where inference ran.
+
+The current EU pool contains only SimpleLLM; Mistral is a separate explicit route.
+With that single-member pool there is no alternate provider to fall back to, even
+when fallback is enabled. The fallback observations below apply only when an
+authorized alternate is actually available.
 
 | Chat | Prompt | Expected |
 | --- | --- | --- |
@@ -61,3 +74,12 @@ Stop:
 ```powershell
 .\stopdemo.ps1
 ```
+
+This stops only the matching repository's Node processes, preserving Ollama and
+unrelated applications. It removes only a lock owned by the process it just stopped;
+unowned/stale locks are left for verified operator recovery.
+
+Azure uses separate Entra sign-in/roles and Azure OpenAI for Public. Azure Ollama
+is not on-premises: the confidential/on-premises fixtures are refusals in cloud
+mode. See [azure-deployment-guide.md](azure-deployment-guide.md). Never submit real
+restricted data to the cloud merely to demonstrate a refusal.

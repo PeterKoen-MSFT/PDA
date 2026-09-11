@@ -131,6 +131,21 @@ function sortLedgerRecords(records) {
   return records.slice().sort((left, right) => left.seq - right.seq);
 }
 
+export function acquireStateLock(stateDir) {
+  const root = Store.prototype._resolveRoot.call({ repoRoot: MODULE_ROOT }, stateDir);
+  ensureDir(root);
+  const lockPath = path.join(root, 'writer.lock');
+  const owner = JSON.stringify({ host: os.hostname(), pid: process.pid, token: crypto.randomUUID() });
+  let descriptor;
+  try { descriptor = fs.openSync(lockPath, 'wx', 0o600); }
+  catch { throw new Error('State is locked. Stop the previous writer; after a crash, an operator must verify it is stopped before removing writer.lock.'); }
+  try { fs.writeFileSync(descriptor, owner); fs.fsyncSync(descriptor); }
+  finally { fs.closeSync(descriptor); }
+  return () => {
+    if (fs.existsSync(lockPath) && fs.readFileSync(lockPath, 'utf8') === owner) fs.unlinkSync(lockPath);
+  };
+}
+
 export class Store {
   constructor(stateDir, options = {}) {
     this.repoRoot = findRepoRoot();

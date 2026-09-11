@@ -1,4 +1,4 @@
-metadata description = 'PDA governance demo — Azure Container Apps hosting with Key Vault at-rest protection, immutable compliance archive, and an optional serverless GPU Ollama route. Built from Azure Verified Modules.'
+metadata description = 'PDA governance demo — Azure Container Apps hosting with Key Vault protection for secrets, an unused archive container, and optional cloud GPU Ollama. Built from Azure Verified Modules.'
 
 targetScope = 'resourceGroup'
 
@@ -13,16 +13,33 @@ param location string = resourceGroup().location
 @description('Full container image reference for the web app, including tag (e.g. myacr.azurecr.io/pda/web:1234). The pipeline supplies this after building and pushing.')
 param webImage string
 
+@minLength(36)
+param authTenantId string
+
+@minLength(36)
+param authClientId string
+
+@secure()
+@minLength(1)
+param authClientSecret string
+
+@secure()
+@minLength(1)
+param authTokenStoreSasUrl string
+
+@allowed(['Public cloud', 'EU-only'])
+param hostGeography string = 'Public cloud'
+
 @description('Container registry name. Leave empty to derive one; the pipeline passes a deterministic name so it can build and push before this deployment runs.')
 param acrName string = ''
 
-@description('Deploy the sovereign Ollama route on a Container Apps serverless GPU profile.')
+@description('Deploy cloud Ollama on a Container Apps serverless GPU profile; this cannot satisfy on-premises requirements.')
 param deployOllama bool = true
 
 @description('Container image for the Ollama route.')
 param ollamaImage string = 'docker.io/ollama/ollama:0.3.14'
 
-@description('Model tag Ollama pulls on start and the app targets for the on-premises/highly confidential route.')
+@description('Model tag used by both the Azure Ollama container and the application. Azure is not on-premises.')
 param ollamaModel string = 'llama3.1'
 
 @description('Serverless GPU workload profile type for the Ollama route. Requires GPU quota in the target region.')
@@ -34,10 +51,15 @@ param ollamaCpu int = 8
 @description('Memory allocated to the Ollama container (must fit the chosen GPU profile).')
 param ollamaMemory string = '56Gi'
 
+@description('Minimum Ollama replicas. 0 costs least but the first request must wait for a GPU cold start and the model download, which exceeds the bounded provider timeout; use 1 to keep the route warm for a demo.')
+@minValue(0)
+@maxValue(1)
+param ollamaMinReplicas int = 0
+
 @description('Name of the Key Vault key that wraps the application data-encryption key.')
 param kekName string = 'pda-kek'
 
-@description('Retention window (days) for the time-based WORM immutability policy on the compliance archive.')
+@description('Retention window (days) for the unlocked time-based policy on the unused archive container.')
 @minValue(1)
 param immutabilityDays int = 365
 
@@ -192,7 +214,7 @@ module keyVault 'br/public:avm/res/key-vault/vault:0.14.0' = {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Storage — SMB share for live state, immutable blob container for the compliance archive
+// Storage — SMB share for live state and unused archive container
 // -------------------------------------------------------------------------------------------------
 module storage 'br/public:avm/res/storage/storage-account:0.33.0' = {
   name: 'storage'
@@ -247,8 +269,8 @@ module storage 'br/public:avm/res/storage/storage-account:0.33.0' = {
   }
 }
 
-// Time-based WORM policy for the compliance archive. Protected append writes keep the
-// append-only ledger archivable while blocking overwrite/delete within the retention window.
+// Unlocked time-based policy on the archive container. Nothing uploads evidence here yet,
+// and an unlocked policy can still be shortened or removed, so this is not immutable storage.
 resource archiveImmutability 'Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies@2024-01-01' = {
   name: '${storageAccountName}/default/${archiveContainerName}/default'
   properties: {
@@ -299,7 +321,10 @@ module azureOpenAi 'br/public:avm/res/cognitive-services/account:0.19.0' = if (d
 }
 
 var azureEnabled = deployAzureOpenAI || !empty(azureOpenAiEndpoint)
-var azureEndpointEffective = deployAzureOpenAI ? '${azureOpenAi!.outputs.endpoint}openai/v1' : azureOpenAiEndpoint
+// The app requires an exact '/openai/v1' path. customSubDomainName fixes the account host,
+// so build the endpoint from it rather than reformatting the module output. Public cloud only.
+var azureProvisionedEndpoint = 'https://${azureAccountName}.openai.azure.com/openai/v1'
+var azureEndpointEffective = deployAzureOpenAI ? azureProvisionedEndpoint : azureOpenAiEndpoint
 
 // -------------------------------------------------------------------------------------------------
 // Container Apps managed environment
@@ -358,7 +383,7 @@ module environment 'br/public:avm/res/app/managed-environment:0.16.0' = {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Ollama sovereign route (serverless GPU) — internal ingress only
+// Cloud Ollama route (serverless GPU) — internal ingress only
 // -------------------------------------------------------------------------------------------------
 module ollamaApp 'br/public:avm/res/app/container-app:0.23.0' = if (deployOllama) {
   name: 'ollamaApp'
@@ -379,7 +404,7 @@ module ollamaApp 'br/public:avm/res/app/container-app:0.23.0' = if (deployOllama
       ]
     }
     scaleSettings: {
-      minReplicas: 0
+      minReplicas: ollamaMinReplicas
       maxReplicas: 1
     }
     volumes: [
@@ -398,7 +423,7 @@ module ollamaApp 'br/public:avm/res/app/container-app:0.23.0' = if (deployOllama
         ]
         args: [
           '-c'
-          'ollama serve & until ollama ls >/dev/null 2>&1; do sleep 1; done; ollama pull ${ollamaModel}; wait'
+          'ollama serve & server_pid=$!; trap "kill $server_pid" TERM INT EXIT; timeout 60 sh -c \'until ollama ls >/dev/null 2>&1; do sleep 1; done\' && timeout 900 ollama pull "$PDA_OLLAMA_MODEL" || exit 1; wait "$server_pid"'
         ]
         resources: {
           cpu: ollamaCpu
@@ -412,6 +437,10 @@ module ollamaApp 'br/public:avm/res/app/container-app:0.23.0' = if (deployOllama
           {
             name: 'OLLAMA_MODELS'
             value: '/root/.ollama/models'
+          }
+          {
+            name: 'PDA_OLLAMA_MODEL'
+            value: ollamaModel
           }
         ]
         volumeMounts: [
@@ -432,6 +461,11 @@ var webFqdn = '${webAppName}.${environment.outputs.defaultDomain}'
 var ollamaBase = deployOllama ? 'https://${ollamaApp!.outputs.fqdn}/v1' : 'http://127.0.0.1:11434/v1'
 
 var baseEnv = [
+  { name: 'PDA_AUTH_TENANT_ID', value: authTenantId }
+  { name: 'PDA_AUTH_CLIENT_ID', value: authClientId }
+  { name: 'PDA_HOST_GEOGRAPHY', value: hostGeography }
+  { name: 'PDA_OLLAMA_GEOGRAPHY', value: hostGeography }
+  { name: 'PDA_OLLAMA_MODEL', value: ollamaModel }
   {
     name: 'PDA_ALLOW_REMOTE'
     value: '1'
@@ -519,6 +553,37 @@ module webApp 'br/public:avm/res/app/container-app:0.23.0' = {
     ingressTargetPort: 8110
     ingressTransport: 'auto'
     ingressAllowInsecure: false
+    terminationGracePeriodSeconds: 300
+    secrets: [
+      { name: 'entra-client-secret', value: authClientSecret }
+      { name: 'auth-token-store', value: authTokenStoreSasUrl }
+    ]
+    authConfig: {
+      platform: { enabled: true }
+      globalValidation: {
+        excludedPaths: ['/healthz']
+        unauthenticatedClientAction: 'RedirectToLoginPage'
+        redirectToProvider: 'azureActiveDirectory'
+      }
+      httpSettings: { requireHttps: true }
+      identityProviders: {
+        azureActiveDirectory: {
+          enabled: true
+          registration: {
+            clientId: authClientId
+            clientSecretSettingName: 'entra-client-secret'
+            openIdIssuer: '${az.environment().authentication.loginEndpoint}${authTenantId}/v2.0'
+          }
+          validation: { allowedAudiences: [authClientId] }
+        }
+      }
+      login: {
+        tokenStore: {
+          enabled: true
+          azureBlobStorage: { sasUrlSettingName: 'auth-token-store' }
+        }
+      }
+    }
     managedIdentities: {
       userAssignedResourceIds: [
         identity.outputs.resourceId
@@ -605,7 +670,7 @@ output identityClientId string = identity.outputs.clientId
 @description('Name of the web container app.')
 output webAppName string = webApp.outputs.name
 
-@description('Storage account name backing state and the compliance archive.')
+@description('Storage account name backing live state and the unused archive container.')
 output storageAccountName string = storage.outputs.name
 
 @description('Azure OpenAI v1 endpoint serving the cloud Public route, if configured.')

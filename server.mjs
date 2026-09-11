@@ -5,14 +5,15 @@ import path from 'node:path';
 
 import { AgentRunner } from './app/agent.mjs';
 import { ENVIRONMENTS, LEVELS, TOOLS, Governance } from './app/governance.mjs';
-import { Store } from './app/storage.mjs';
+import { Store, acquireStateLock } from './app/storage.mjs';
 import { createProtector } from './app/protector.mjs';
 import { initTelemetry } from './app/telemetry.mjs';
+import { canAccess, createAuthenticator } from './app/auth.mjs';
 
 // Remote hosting (e.g. Azure Container Apps) is opt-in via PDA_ALLOW_REMOTE=1.
 // When unset the server keeps its original loopback-only behaviour unchanged.
 const ALLOW_REMOTE = process.env.PDA_ALLOW_REMOTE === '1';
-const HOST = process.env.PDA_BIND_HOST || (ALLOW_REMOTE ? '0.0.0.0' : '127.0.0.1');
+const HOST = ALLOW_REMOTE ? (process.env.PDA_BIND_HOST || '0.0.0.0') : '127.0.0.1';
 const PORT = Number(process.env.PORT || process.env.PDA_PORT || 8110);
 const PUBLIC_SCHEME = (process.env.PDA_PUBLIC_SCHEME || (ALLOW_REMOTE ? 'https' : 'http')).toLowerCase();
 // Loopback names are always allowed so the in-process SDK model proxy keeps working.
@@ -49,12 +50,13 @@ const HTML_FILES = new Map([
   ['/admin.html', path.join(PROJECT_ROOT, 'public', 'admin.html')],
   ['/compliance', path.join(PROJECT_ROOT, 'public', 'compliance.html')],
   ['/compliance.html', path.join(PROJECT_ROOT, 'public', 'compliance.html')],
-  ['/mockup', path.join(PROJECT_ROOT, 'mockup', 'index.html')],
-  ['/mockup/', path.join(PROJECT_ROOT, 'mockup', 'index.html')],
-  ['/mockup/index.html', path.join(PROJECT_ROOT, 'mockup', 'index.html')],
 ]);
 
+ensureLoopbackPort();
+const authenticate = await createAuthenticator();
 const telemetry = await initTelemetry();
+const releaseStateLock = acquireStateLock(STATE_DIR);
+process.once('exit', releaseStateLock);
 const store = new Store(STATE_DIR, { protector: await createProtector(STATE_DIR), onAppend: telemetry.onLedgerAppend });
 const cookieSigningKey = store.getSecret('operator-cookie-secret') || crypto.randomBytes(32).toString('hex');
 if (!store.secretPresent('operator-cookie-secret')) store.setSecret('operator-cookie-secret', cookieSigningKey);
@@ -65,6 +67,9 @@ const runner = new AgentRunner(governance, store);
 let activeTurn = null;
 
 function resolveStateDir() {
+  if (process.env.PDA_STATE_DIR) {
+    return path.resolve(process.env.PDA_STATE_DIR);
+  }
   const localAppData = process.env.LOCALAPPDATA;
   if (!localAppData) {
     throw new Error('LOCALAPPDATA is required to locate the demo state directory');
@@ -73,6 +78,12 @@ function resolveStateDir() {
 }
 
 function ensureLoopbackPort() {
+  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535 || (!ALLOW_REMOTE && PORT !== 8110)) {
+    throw new Error('Invalid port; local demo mode requires port 8110.');
+  }
+  if (!ALLOW_REMOTE && process.env.PDA_BIND_HOST && process.env.PDA_BIND_HOST !== '127.0.0.1') {
+    throw new Error('Remote binding requires PDA_ALLOW_REMOTE=1.');
+  }
   for (const envName of ['PORT', 'PDA_PORT']) {
     const value = process.env[envName];
     if (value && Number(value) !== PORT) {
@@ -366,26 +377,7 @@ function extractInlineScriptHashes(html) {
   return hashes;
 }
 
-function isMockupFile(filePath) {
-  return filePath.endsWith(path.join('mockup', 'index.html'));
-}
-
-function buildContentSecurityPolicy(html, filePath) {
-  if (isMockupFile(filePath)) {
-    return [
-      "default-src 'none'",
-      "base-uri 'none'",
-      "object-src 'none'",
-      "form-action 'none'",
-      "connect-src 'none'",
-      "frame-src 'none'",
-      "frame-ancestors 'none'",
-      "img-src 'self' data:",
-      "style-src 'unsafe-inline'",
-      "script-src 'unsafe-inline'",
-    ].join('; ');
-  }
-
+function buildContentSecurityPolicy(html) {
   const scriptHashes = extractInlineScriptHashes(html);
   return [
     "default-src 'none'",
@@ -400,8 +392,8 @@ function buildContentSecurityPolicy(html, filePath) {
   ].join('; ');
 }
 
-function setSecurityHeaders(res, filePath, html) {
-  res.setHeader('content-security-policy', buildContentSecurityPolicy(html, filePath));
+function setSecurityHeaders(res, html) {
+  res.setHeader('content-security-policy', buildContentSecurityPolicy(html));
   res.setHeader('cache-control', 'no-store');
   res.setHeader('x-content-type-options', 'nosniff');
   res.setHeader('referrer-policy', 'no-referrer');
@@ -410,7 +402,7 @@ function setSecurityHeaders(res, filePath, html) {
 function serveFile(res, filePath, { setCookieValue = null, html = false } = {}) {
   const body = fs.readFileSync(filePath);
   if (html) {
-    setSecurityHeaders(res, filePath, body.toString('utf8'));
+    setSecurityHeaders(res, body.toString('utf8'));
   } else {
     res.setHeader('cache-control', 'no-store');
     res.setHeader('x-content-type-options', 'nosniff');
@@ -555,6 +547,10 @@ async function handleChatMessage(req, res, capability, chatId) {
 async function handleApi(req, res, capability, parsedUrl) {
   const pathname = parsedUrl.pathname;
 
+  if (pathname === '/api/me' && req.method === 'GET') {
+    return sendJson(res, 200, { roles: req.principal.roles, local: req.principal.local });
+  }
+
   if (pathname === '/api/policy/preview' && req.method === 'POST') {
     assertSameOrigin(req);
     const parsed = await extractJsonBody(req);
@@ -569,7 +565,9 @@ async function handleApi(req, res, capability, parsedUrl) {
   }
 
   if (req.method === 'GET' && pathname === '/api/state') {
-    sendJson(res, 200, apiState());
+    sendJson(res, 200, req.principal.roles.includes('Administrator') ? apiState() : {
+      levels: governance.levels(), vocabulary: governance.vocabulary(),
+    });
     return;
   }
 
@@ -740,12 +738,19 @@ const server = http.createServer(async (req, res) => {
     }
     assertAllowedHost(req);
     const parsedUrl = new URL(req.url || '/', `http://${hostHeader(req) || `${HOST}:${PORT}`}`);
-    const capability = parseCapability(req);
-
     // SDK model calls use a per-turn unguessable capability, not browser cookies.
     if (parsedUrl.pathname.startsWith('/internal/model/')) {
+      if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) return unauthorized(res);
       await runner.proxyRequest(req, res);
       return;
+    }
+
+    req.principal = await authenticate(req);
+    if (!req.principal) return unauthorized(res, 'Sign in through the configured Entra provider.');
+    if (!canAccess(req.principal, parsedUrl.pathname)) return sendJson(res, 403, { error: 'Required application role is missing.' });
+    const capability = parseCapability(req);
+    if (capability && !req.principal.local) {
+      capability.ownerHash = crypto.createHash('sha256').update(`${req.principal.id}:${capability.ownerHash}`).digest('hex');
     }
 
     if (parsedUrl.pathname.startsWith('/api/')) {
@@ -780,6 +785,8 @@ async function closeServer() {
   await new Promise((resolve) => {
     server.close(() => resolve());
   });
+  releaseStateLock();
+  await telemetry.shutdown().catch(() => {});
 }
 
 async function main() {

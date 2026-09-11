@@ -1,12 +1,11 @@
 # PDA governance demo — Linux container image for Azure Container Apps.
 # At-rest protection uses Azure Key Vault (not Windows DPAPI) via PDA_PROTECTOR=keyvault.
-FROM node:20-bookworm-slim AS build
+FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json ./
-# Skip Windows-only optional deps (@primno/dpapi); the container uses the Key Vault protector.
-RUN npm install --omit=dev --omit=optional --no-audit --no-fund
+RUN npm install --omit=dev --no-audit --no-fund
 
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 ENV NODE_ENV=production \
     PDA_ALLOW_REMOTE=1 \
     PDA_PROTECTOR=keyvault \

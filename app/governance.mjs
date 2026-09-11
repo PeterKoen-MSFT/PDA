@@ -44,6 +44,8 @@ const DEFAULT_SIMPLELLM_ENDPOINT = 'https://api.simplellm.eu/v1';
 // Azure OpenAI / AI Foundry OpenAI-compatible v1 endpoint. Authenticated with the
 // app's managed identity (no API key). Empty locally, set by the container.
 const DEFAULT_AZURE_ENDPOINT = process.env.AZURE_OPENAI_ENDPOINT || '';
+const CLOUD_HOST = process.env.PDA_ALLOW_REMOTE === '1';
+const HOST_GEOGRAPHY = CLOUD_HOST ? (process.env.PDA_HOST_GEOGRAPHY || 'Public cloud') : 'On-premises';
 const CREDENTIAL_ISSUER = 'CG Demo Credential Authority';
 const CREDENTIAL_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PARTICIPANTS = [
@@ -371,8 +373,8 @@ export class Governance {
     }
 
     const before = { level: current.level, sovereignty: current.sovereignty };
-    const nextLevel = this._maxLevel(current.level, target.level);
-    const nextSovereignty = this._maxSovereignty(current.sovereignty, target.sovereignty);
+    const nextLevel = this._maxLevel(current.level, target.level, current);
+    const nextSovereignty = this._maxSovereignty(current.sovereignty, target.sovereignty, current);
     const changed = before.level !== nextLevel || before.sovereignty !== nextSovereignty;
 
     current.level = nextLevel;
@@ -423,6 +425,10 @@ export class Governance {
     const state = this._stateForChat(chat);
     if (state.blocked) throw this._routeError('SOVEREIGNTY_CONFLICT', state.conflictReason || 'Conflicting sovereignty restrictions remain in this chat.');
     const policy = this._policyForChat(state).payload;
+    if (CLOUD_HOST && (this._rankSovereignty(state.sovereignty, policy) > this._baseEnvironmentRank(HOST_GEOGRAPHY)
+      || state.restrictions?.some(restriction => ['IT', 'DE'].includes(restriction)))) {
+      throw this._routeError('HOST_NOT_PERMITTED', 'This cloud host cannot satisfy the requested residency. Use an approved local deployment; no model was called.');
+    }
     const level = this._baseLevelId(state.level, policy);
     const preference = this._routePreference(level, policy);
     const settings = this._settings;
@@ -607,6 +613,10 @@ export class Governance {
     const saved = this.store.load('policy-draft', null);
     const draft = saved ? this._clone(saved) : this._createDraftFromActive();
     let changed = !saved;
+    if (DEFAULT_AZURE_ENDPOINT && Array.isArray(draft.allowedModels?.Public) && !draft.allowedModels.Public.includes('azure')) {
+      draft.allowedModels.Public.push('azure');
+      changed = true;
+    }
     for (const [levelId, models] of Object.entries(draft.allowedModels ?? {})) {
       if (!Array.isArray(models)) continue;
       const activeModels = models.filter(routeId => ROUTE_IDS.has(routeId));
@@ -641,7 +651,13 @@ export class Governance {
       const activeRoutes = Array.isArray(saved.routes)
         ? saved.routes.filter(config => ROUTE_IDS.has(config?.id ?? config?.routeId))
         : Object.fromEntries(Object.entries(saved.routes).filter(([routeId]) => ROUTE_IDS.has(routeId)));
-      this._applyRouteSettings(next, activeRoutes);
+      const entries = Array.isArray(activeRoutes) ? activeRoutes : Object.entries(activeRoutes).map(([id, config]) => ({ ...config, id }));
+      this._applyRouteSettings(next, entries.map(config => {
+        const routeId = config.id ?? config.routeId;
+        if (!['azure', 'ollama'].includes(routeId)) return config;
+        const { baseUrl, ...retained } = config;
+        return retained;
+      }));
     }
     if (saved?.preferences) {
       for (const preference of Object.keys(next.preferences)) {
@@ -658,6 +674,13 @@ export class Governance {
       }
       this._applyEuRoutingSettings(next, euRouting);
     }
+    if (DEFAULT_AZURE_ENDPOINT) {
+      next.routes.azure.enabled = true;
+      next.routes.azure.model = process.env.AZURE_OPENAI_DEPLOYMENT || next.routes.azure.model;
+    }
+    if (process.env.PDA_OLLAMA_MODEL) next.routes.ollama.model = process.env.PDA_OLLAMA_MODEL;
+    if (process.env.PDA_PUBLIC_ROUTE || CLOUD_HOST) next.preferences.public = process.env.PDA_PUBLIC_ROUTE || 'azure';
+    if (CLOUD_HOST) next.routes.copilot.enabled = false;
     for (const routeId of REMOTE_ROUTE_IDS) {
       next.secrets.routeApiKeyPresent[routeId] = Boolean(this.store.secretPresent(this._routeSecretName(routeId)));
     }
@@ -703,7 +726,7 @@ export class Governance {
 
   _loadChatBook() {
     const saved = this.store.load('chats', []);
-    return Array.isArray(saved) ? saved : [];
+    return Array.isArray(saved) ? saved.map(chat => ({ ...chat, busy: false })) : [];
   }
 
   _persistChats() {
@@ -1563,7 +1586,7 @@ export class Governance {
           id: 'copilot',
           kind: 'copilot',
           name: 'GitHub Copilot',
-          enabled: true,
+          enabled: !CLOUD_HOST,
           model: 'gpt-5-mini',
           baseUrl: DEFAULT_PUBLIC_ENDPOINT,
           geography: 'Public cloud',
@@ -1574,9 +1597,10 @@ export class Governance {
           kind: 'ollama',
           name: 'Ollama',
           enabled: true,
-          model: 'qwen2.5:7b',
+          model: process.env.PDA_OLLAMA_MODEL || 'qwen2.5:7b',
           baseUrl: DEFAULT_OLLAMA_ENDPOINT,
-          geography: 'On-premises',
+          geography: CLOUD_HOST || !['127.0.0.1', 'localhost', '[::1]'].includes(new URL(DEFAULT_OLLAMA_ENDPOINT).hostname)
+            ? (process.env.PDA_OLLAMA_GEOGRAPHY === 'EU-only' ? 'EU-only' : 'Public cloud') : 'On-premises',
           costScore: 0,
         },
         azure: {
@@ -1586,7 +1610,7 @@ export class Governance {
           enabled: Boolean(DEFAULT_AZURE_ENDPOINT),
           model: process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-4o-mini',
           baseUrl: DEFAULT_AZURE_ENDPOINT || 'https://azure-openai.invalid/openai/v1',
-          geography: process.env.PDA_AZURE_GEOGRAPHY || 'Public cloud',
+          geography: 'Public cloud',
           costScore: 0,
         },
         mistral: {
@@ -1611,7 +1635,7 @@ export class Governance {
         },
       },
       preferences: {
-        public: process.env.PDA_PUBLIC_ROUTE || 'copilot',
+        public: process.env.PDA_PUBLIC_ROUTE || (CLOUD_HOST ? 'azure' : 'copilot'),
         internal: 'ollama',
         high: 'ollama',
       },
@@ -1716,6 +1740,7 @@ export class Governance {
 
   _routeMatchesSovereignty(state, route, policyOrChat = state) {
     const policy = this._policyPayload(policyOrChat);
+    if (CLOUD_HOST && route.kind === 'copilot') return false;
     if (this._baseLevelId(state.level, policy) !== 'Public' && route.kind === 'copilot') return false;
     if (Array.isArray(state.restrictions) && state.restrictions.includes('IT')) {
       return false;
@@ -1961,7 +1986,7 @@ export class Governance {
       throw new Error('Copilot endpoint is fixed for the demo');
     }
     if (routeId === 'ollama' && value !== DEFAULT_OLLAMA_ENDPOINT) {
-      throw new Error('Ollama endpoint must remain loopback only');
+      throw new Error('Ollama endpoint must match the configured endpoint');
     }
     if (routeId === 'azure') {
       let url;
@@ -1970,10 +1995,11 @@ export class Governance {
       } catch {
         throw new Error('Azure OpenAI endpoint must be a valid URL');
       }
-      if (url.protocol !== 'https:') {
-        throw new Error('Azure OpenAI endpoint must use https');
+      if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.port
+        || url.pathname !== '/openai/v1' || (!url.hostname.endsWith('.openai.azure.com') && url.hostname !== 'azure-openai.invalid')) {
+        throw new Error('Azure OpenAI requires an approved openai.azure.com HTTPS /openai/v1 endpoint.');
       }
-      if (DEFAULT_AZURE_ENDPOINT && value !== DEFAULT_AZURE_ENDPOINT) {
+      if (value !== (DEFAULT_AZURE_ENDPOINT || 'https://azure-openai.invalid/openai/v1')) {
         throw new Error('Azure OpenAI endpoint must match the configured endpoint');
       }
     }

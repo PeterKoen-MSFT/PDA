@@ -1,12 +1,13 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const SDK_VERSION = '1.0.13';
 const TURN_MS = 240_000;
 const TOOL_IDS = ['weather', 'sales', 'public_send'];
-const dependencies = process.env.PDA_DEPENDENCIES || path.join(process.env.LOCALAPPDATA, 'PDA', 'sdk-demo', 'dependencies');
+const dependencies = process.env.PDA_DEPENDENCIES || path.join(process.env.LOCALAPPDATA || os.homedir(), 'PDA', 'sdk-demo', 'dependencies');
 const OLLAMA_BASE = process.env.PDA_OLLAMA_BASE || 'http://127.0.0.1:11434/v1';
 const OLLAMA_TAGS_URL = `${OLLAMA_BASE.replace(/\/v1\/?$/, '')}/api/tags`;
 const INTERNAL_BASE = process.env.PDA_INTERNAL_BASE || `http://127.0.0.1:${process.env.PORT || process.env.PDA_PORT || 8110}`;
@@ -48,6 +49,7 @@ export class AgentRunner {
       sovereignty: chat.sovereignty, policyVersion: chat.policyVersion, policyDigest: chat.policyDigest, ...data });
   }
   async clientFor(route) {
+    if (process.env.PDA_ALLOW_REMOTE === '1' && route.kind === 'copilot') throw failure('cloud_copilot_disabled', 'Use Azure OpenAI for the cloud Public route.');
     const { CopilotClient } = await this.loadSdk();
     const env = { ...process.env, COPILOT_TELEMETRY_ENABLED: 'false', DO_NOT_TRACK: '1' };
     for (const key of Object.keys(env)) if (/MISTRAL|SIMPLELLM|PDA_OPERATOR|AZURE.*KEY|OPENAI.*KEY/i.test(key)) delete env[key];
@@ -70,13 +72,18 @@ export class AgentRunner {
     const { DefaultAzureCredential } = await import('@azure/identity');
     this._azureCredential ??= new DefaultAzureCredential();
     const scope = process.env.AZURE_OPENAI_SCOPE || 'https://cognitiveservices.azure.com/.default';
-    const token = await this._azureCredential.getToken(scope);
+    const token = await this._azureCredential.getToken(scope, { abortSignal: AbortSignal.timeout(15000) });
     if (!token?.token) throw failure('azure_token_failed', 'Could not obtain a managed-identity token for Azure OpenAI.');
     this._azureToken = token;
     return token.token;
   }
   async authHeaderFor(route) {
-    if (route?.kind === 'azure') return { Authorization: `Bearer ${await this.azureBearer()}` };
+    if (route?.kind === 'azure') {
+      if (!process.env.AZURE_OPENAI_ENDPOINT || route.baseUrl !== process.env.AZURE_OPENAI_ENDPOINT) {
+        throw failure('azure_endpoint_required', 'Configure the approved Azure OpenAI endpoint before requesting a token.');
+      }
+      return { Authorization: `Bearer ${await this.azureBearer()}` };
+    }
     const key = this.providerKey(route);
     return key ? { Authorization: `Bearer ${key}` } : {};
   }
@@ -114,6 +121,8 @@ export class AgentRunner {
         const body = JSON.parse(await bounded(response));
         models = id === 'ollama' ? body.models.map(m => ({ id: m.name })) : body.data.map(m => ({ id: m.id }));
       }
+      // Azure lists models, not deployment names, so discovery cannot confirm the configured deployment.
+      if (id === 'azure') return this.readiness[id] = { ok: true, message: 'Azure OpenAI accepted the managed-identity listing request. The configured deployment name and inference are unverified until a governed turn runs.', models, checkedAt: new Date().toISOString() };
       const known = models.some(m => m.id === route.model);
       return this.readiness[id] = { ok: known, message: known ? 'Configured model discovered. Inference has not been tested by this check.' : 'Configured model not in the discovered list.', models, checkedAt: new Date().toISOString() };
     } catch (error) { return this.readiness[id] = { ok: false, message: this.safeError(error), code: error.code || 'probe_failed', checkedAt: new Date().toISOString() }; }
@@ -174,7 +183,6 @@ export class AgentRunner {
           },
         });
         this.event('sdk-session-started', chat, { sessionId: run.session.sessionId, sdkVersion: SDK_VERSION, routeId: run.route.id });
-        run.session.on('assistant.message_delta', event => { if (run.live && !run.elevated) emit({ type: 'delta', text: event.data.deltaContent }); });
         const history = chat.messages.slice(-12).map(({ role, content }) => ({ role, content }));
         let response;
         try {

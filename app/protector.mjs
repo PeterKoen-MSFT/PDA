@@ -92,21 +92,30 @@ export async function createKeyVaultProtector(stateDir) {
 
   const credential = new DefaultAzureCredential();
   const keyClient = new KeyClient(vaultUri, credential);
-  const kek = await keyClient.getKey(keyName);
-  const cryptoClient = new CryptographyClient(kek.id, credential);
-
   const dekPath = path.join(stateDir, DEK_FILE);
   let dek;
   if (fs.existsSync(dekPath)) {
-    const wrapped = toBuffer(fs.readFileSync(dekPath, 'utf8').trim());
+    let envelope;
+    try { envelope = JSON.parse(fs.readFileSync(dekPath, 'utf8')); }
+    catch { throw new Error('Legacy wrapped DEK has no key version. Recover its original Key Vault key ID before migrating; no key was replaced.'); }
+    const keyId = new URL(envelope.keyId);
+    if (keyId.origin !== new URL(vaultUri).origin || keyId.search || keyId.hash
+      || !keyId.pathname.startsWith(`/keys/${keyName}/`) || keyId.pathname.split('/').length !== 4
+      || !keyId.pathname.split('/')[3] || envelope.algorithm !== KEK_ALGORITHM || envelope.version !== 1) {
+      throw new Error('Invalid wrapped data key envelope');
+    }
+    const cryptoClient = new CryptographyClient(keyId.href, credential);
+    const wrapped = toBuffer(envelope.wrappedKey);
     const { result } = await cryptoClient.unwrapKey(KEK_ALGORITHM, wrapped);
     dek = Buffer.from(result);
   } else {
+    const kek = await keyClient.getKey(keyName);
+    const cryptoClient = new CryptographyClient(kek.id, credential);
     dek = crypto.randomBytes(32);
     const { result } = await cryptoClient.wrapKey(KEK_ALGORITHM, dek);
     fs.mkdirSync(path.dirname(dekPath), { recursive: true });
     const tempPath = `${dekPath}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tempPath, base64(toBuffer(result)), 'utf8');
+    fs.writeFileSync(tempPath, JSON.stringify({ version: 1, keyId: kek.id, algorithm: KEK_ALGORITHM, wrappedKey: base64(toBuffer(result)) }), { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tempPath, dekPath);
   }
   if (dek.length !== 32) {

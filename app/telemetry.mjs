@@ -2,11 +2,11 @@
 //
 // The signed append-only ledger remains the system of record. When enabled, each
 // ledger append is also emitted as an OpenTelemetry log record for observability
-// (dashboards, alerting, trace correlation). Only non-sensitive, allow-listed fields
+// (dashboards and alerting). Only allow-listed metadata fields
 // are exported — never signatures, secrets, prompts, tool arguments/results, or
-// credentials. Telemetry is best-effort and must never affect the ledger.
+// credentials. Metadata can still be sensitive; delivery is best-effort.
 
-const NOOP = { onLedgerAppend: null };
+const NOOP = { onLedgerAppend: null, shutdown: async () => {} };
 
 // Explicit allow-list. Anything not listed here is never exported.
 function projectAttributes(record) {
@@ -28,7 +28,6 @@ function projectAttributes(record) {
     'pda.outcome': record.outcome,
     'pda.policy_version': record.policyVersion,
     'pda.policy_digest': record.policyDigest,
-    'pda.reason': record.reason,
     'pda.tool_id': record.toolId,
     'pda.http_status': record.httpStatus,
   };
@@ -50,28 +49,25 @@ export async function initTelemetry() {
   }
 
   try {
-    const { useAzureMonitor } = await import('@azure/monitor-opentelemetry');
-    useAzureMonitor({
-      azureMonitorExporterOptions: { connectionString },
-      // The Copilot SDK and app own their own signals; only export what we emit here.
-      instrumentationOptions: {
-        http: { enabled: true },
-      },
-    });
-
-    const { logs, SeverityNumber } = await import('@opentelemetry/api-logs');
-    const logger = logs.getLogger('pda.ledger');
+    const { AzureMonitorLogExporter } = await import('@azure/monitor-opentelemetry-exporter');
+    const { LoggerProvider, BatchLogRecordProcessor } = await import('@opentelemetry/sdk-logs');
+    const exporter = new AzureMonitorLogExporter({ connectionString, disableOfflineStorage: true });
+    const provider = new LoggerProvider({ forceFlushTimeoutMillis: 3000 });
+    provider.addLogRecordProcessor(new BatchLogRecordProcessor(exporter, {
+      maxQueueSize: 256, maxExportBatchSize: 32, scheduledDelayMillis: 1000, exportTimeoutMillis: 3000,
+    }));
+    const logger = provider.getLogger('pda.ledger');
 
     const onLedgerAppend = (record) => {
       logger.emit({
-        severityNumber: SeverityNumber.INFO,
+        severityNumber: 9,
         severityText: 'INFO',
         body: `ledger.${record.kind}`,
         attributes: projectAttributes(record),
       });
     };
 
-    return { onLedgerAppend };
+    return { onLedgerAppend, shutdown: () => provider.shutdown() };
   } catch {
     // If OpenTelemetry packages or the exporter fail to initialise, run without a
     // telemetry mirror. The ledger is unaffected.

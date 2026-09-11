@@ -4,6 +4,22 @@ This guide provisions the PDA governance demo to Azure Container Apps using Bice
 (Azure Verified Modules) and GitHub Actions. All Azure logic lives in PowerShell
 scripts under `scripts/`; the workflows only orchestrate them.
 
+**Validation status:** source regression checks and Bicep compilation are not a
+completed deployment. Linux SDK startup, Azure Files permissions, Entra sign-in,
+role isolation, Key Vault access, GPU readiness and telemetry delivery still need
+verification in a disposable Azure environment. Use synthetic data only.
+
+Eight isolated source regressions cover signed user tokens and role isolation,
+HTTP identity binding, state-lock exclusion, versioned key envelopes, pinned-policy
+classification, cloud residency refusal, credential-output withholding, and explicit
+OpenTelemetry log export. JavaScript/PowerShell syntax and both Bicep templates
+pass. The seven direct npm dependencies had no known CVEs in the advisory check;
+that is not a transitive-dependency or container-image security assessment.
+
+No Azure resources were deployed during these repairs. The archive remains unused
+and unlocked. The manual parameter example requires `PDA_ACR_NAME` to match the
+registry hosting `PDA_WEB_IMAGE`; required values deliberately have no secret defaults.
+
 ## Contents
 
 - [PDA on Azure — Deployment Guide](#pda-on-azure--deployment-guide)
@@ -24,8 +40,8 @@ scripts under `scripts/`; the workflows only orchestrate them.
 
 A single resource-group deployment ([infra/main.bicep](../infra/main.bicep)) creates:
 Log Analytics, Application Insights, a user-assigned managed identity, Container
-Registry, Key Vault (with an RSA KEK), a Storage account (SMB state share + immutable
-compliance archive), a Container Apps environment, the web app, and — optionally — the
+Registry, Key Vault (with an RSA KEK), a Storage account (SMB state share + unused
+archive container with an unlocked retention policy), a Container Apps environment, the web app, and — optionally — the
 serverless-GPU Ollama route and an Azure OpenAI (AI Foundry) account for the cloud
 Public route. See [azure-architecture.md](azure-architecture.md) for the full picture.
 
@@ -46,58 +62,44 @@ Pipeline stages ([.github/workflows/deploy.yml](../.github/workflows/deploy.yml)
   Request quota, or set `PDA_DEPLOY_OLLAMA=false` to skip it.
 - Azure CLI ≥ 2.60 with the Bicep CLI (only for manual deploys).
 - A GitHub repository with Actions enabled.
+- Node 22.12 or later and PowerShell 7 for manual script execution.
+- A separate single-tenant Entra web registration for browser sign-in. Define app
+  roles `User`, `Administrator`, and `Compliance`, require user assignment on its
+  enterprise application, and assign the appropriate roles. Administrator includes
+  chat access, but not Compliance. Enable ID-token issuance, create a client secret,
+  and register `https://<web-fqdn>/.auth/login/aad/callback` once the FQDN is known.
+  Missing redirect configuration prevents login; application access fails closed.
+- A dedicated private blob container for EasyAuth tokens with a scoped, expiring
+  container SAS allowing read/write/list/delete. Supply the SAS URL as a GitHub
+  environment secret. This prerequisite is separate from the compliance archive.
+  Track and rotate both the client secret and token-store SAS.
+- Azure public cloud only; national-cloud authorities are not supported by the
+  application's signed-token validator.
 
 ## 1. Create the Entra app registration and federated credential
 
-Create an app registration the workflow uses for OIDC (no client secret):
-
-```bash
-az ad app create --display-name "pda-github-deployer"
-APP_ID=$(az ad app list --display-name "pda-github-deployer" --query "[0].appId" -o tsv)
-az ad sp create --id "$APP_ID"
-
-# Federated credential scoped to your repo's production environment.
-az ad app federated-credential create --id "$APP_ID" --parameters '{
-  "name": "pda-github-production",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:<OWNER>/<REPO>:environment:production",
-  "audiences": ["api://AzureADTokenExchange"]
-}'
-```
+In the Entra portal, create `pda-github-deployer` and its enterprise application.
+Add a GitHub federated credential with issuer `https://token.actions.githubusercontent.com`,
+subject `repo:<OWNER>/<REPO>:environment:production`, and audience
+`api://AzureADTokenExchange`. This workflow registration needs no client secret;
+do not reuse it for browser login.
 
 > The `subject` must match how the workflow runs. This repo's workflows use
 > `environment: production`, so the subject is
 > `repo:<OWNER>/<REPO>:environment:production`. For branch-triggered runs without an
 > environment, use `repo:<OWNER>/<REPO>:ref:refs/heads/main` instead.
 
-Record the app (client) ID, your tenant ID and subscription ID:
-
-```bash
-echo "AZURE_CLIENT_ID=$APP_ID"
-az account show --query "{tenantId:tenantId, subscriptionId:id}" -o json
-```
+Record the workflow client ID, tenant ID and target subscription ID from the portal.
 
 ## 2. Grant Azure permissions
 
-The deploying principal needs to create resources and assign roles in the target
-scope. For a demo, grant it at the subscription (or a pre-created resource group):
+The Bicep bootstrap creates the resource group at subscription scope and uses AVM
+for ACR. Have an administrator grant subscription deployment/resource-group creation
+permissions and resource-write, ACR build and role-assignment permissions at the
+target scope. Use least-privilege custom roles or controlled demo-scope assignments;
+resource-group-only credentials cannot run this subscription bootstrap.
 
-```bash
-SP_OBJECT_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
-SUB_ID=$(az account show --query id -o tsv)
-
-# Create/assign at a resource group you control (recommended) or the subscription.
-az role assignment create --assignee-object-id "$SP_OBJECT_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Contributor" --scope "/subscriptions/$SUB_ID"
-
-# Needed because the template creates role assignments.
-az role assignment create --assignee-object-id "$SP_OBJECT_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "User Access Administrator" --scope "/subscriptions/$SUB_ID"
-```
-
-Optionally set `DEPLOYER_PRINCIPAL_ID=$SP_OBJECT_ID` (see below) so the deployer is
+Optionally set `DEPLOYER_PRINCIPAL_ID` to the workflow principal object ID so it is
 granted **Key Vault Secrets Officer** for seeding secrets.
 
 ## 3. Configure GitHub secrets and variables
@@ -112,6 +114,8 @@ Secrets:
 | `AZURE_CLIENT_ID` | app (client) ID from step 1 |
 | `AZURE_TENANT_ID` | your tenant ID |
 | `AZURE_SUBSCRIPTION_ID` | your subscription ID |
+| `PDA_AUTH_CLIENT_SECRET` | Browser-login registration's client secret |
+| `PDA_AUTH_TOKEN_STORE_SAS_URL` | Dedicated EasyAuth token container SAS URL |
 
 Variables:
 
@@ -120,6 +124,8 @@ Variables:
 | `AZURE_RESOURCE_GROUP` | `pda-demo-rg` | Created if missing |
 | `AZURE_LOCATION` | `swedencentral` | Use a GPU-capable region if deploying Ollama |
 | `PDA_NAME_PREFIX` | `pda` | 2–8 lower-case chars/digits |
+| `PDA_AUTH_CLIENT_ID` | *(web client ID)* | Separate from workflow identity |
+| `PDA_HOST_GEOGRAPHY` | `Public cloud` | `EU-only` only after verifying hosting and data destinations; never on-premises |
 | `PDA_DEPLOY_OLLAMA` | `true` / `false` | Toggle the GPU route |
 | `PDA_OLLAMA_MODEL` | `llama3.1` | Model pulled on start |
 | `PDA_OLLAMA_PROFILE` | `Consumption-GPU-NC8as-T4` | Must match available GPU quota |
@@ -127,6 +133,8 @@ Variables:
 | `PDA_AZURE_OPENAI_ENDPOINT` | *(v1 endpoint)* | Use an existing Azure OpenAI instead of provisioning |
 | `PDA_AZURE_OPENAI_DEPLOYMENT` | `gpt-4o-mini` | Deployment name the Public route targets |
 | `PDA_AZURE_OPENAI_MODEL` | `gpt-4o-mini` | Model to deploy when provisioning |
+| `PDA_AZURE_OPENAI_MODEL_VERSION` | `2024-07-18` | Check regional availability |
+| `PDA_AZURE_OPENAI_CAPACITY` | `10` | Thousands of tokens/minute; requires quota |
 | `DEPLOYER_PRINCIPAL_ID` | *(SP object ID)* | Optional; grants KV Secrets Officer |
 
 ## 4. Deploy via GitHub Actions
@@ -136,17 +144,30 @@ Variables:
   Actions tab.
 - On success, the deploy step prints the public web URL (also available as the
   `deploy` step output `webUrl`).
+- Either an existing Azure OpenAI endpoint or new provisioning is required. The
+  scripts run isolated regression tests, provision the Bicep bootstrap, build in
+  ACR, validate the main deployment, and deactivate old web revisions before update.
+  Expect downtime. Both workflows share `pda-production` concurrency; do not bypass
+  it with simultaneous manual deployments. Secrets use a temporary parameter file
+  removed in `finally`, not logged inline arguments.
 
 ## 5. First-run configuration in the app
 
-1. Open the web URL and go to **Administrator**.
-2. Review and **publish** the signed policy revision you want to demo.
+1. Complete the redirect URI and sign in as an assigned Administrator.
+2. Review and **publish** a draft with `azure` allowed for Public, then start a new
+  chat. Existing signed policies and credentials are not silently rewritten; a
+  new publication issues demo credentials for current participants.
 3. In **Route settings**, enable providers and enter API keys for the EU routes
    (Mistral / SimpleLLM). Keys are protected at rest via the Key Vault–backed
    envelope encryption.
-4. Set the **Internal model preference** (Mistral or SimpleLLM).
-5. The **sovereign / highly confidential** route uses the internal Ollama app; the
-   first turn may be slower while the model finishes pulling.
+4. Set the **Internal model preference** to an allowed provider, including Ollama
+  only when its actual host geography satisfies policy.
+5. Azure Ollama is not on-premises. On-premises and country-restricted fixture
+  requests are refused before model use. Their prompts have already reached the
+  cloud web server and may be persisted: use synthetic data only.
+6. For an existing Azure OpenAI account, assign **Cognitive Services OpenAI User**
+  to the deployed managed identity before use; the template grants this only for
+  the account it provisions. Verify an actual Public turn.
 
 > The **cloud Public route** is served by **Azure OpenAI via the managed identity**
 > when `PDA_DEPLOY_AZURE_OPENAI=true` (or an existing `PDA_AZURE_OPENAI_ENDPOINT` is
@@ -163,6 +184,9 @@ $env:AZURE_RESOURCE_GROUP  = 'pda-demo-rg'
 $env:AZURE_LOCATION        = 'swedencentral'
 $env:PDA_NAME_PREFIX       = 'pda'
 
+# Also supply the required auth and Azure OpenAI variables listed above.
+# Supply secrets privately through your terminal or approved secret manager.
+
 az login
 ./scripts/Connect-Azure.ps1
 ./scripts/Build-And-PushImage.ps1
@@ -174,10 +198,13 @@ Or deploy the template directly (after building/pushing an image):
 ```powershell
 az deployment group create `
   --resource-group pda-demo-rg `
-  --template-file infra/main.bicep `
-  --parameters infra/main.bicepparam `
-  --parameters webImage='<acr>.azurecr.io/pda/web:<tag>' acrName='<acr>'
+  --parameters infra/main.bicepparam
 ```
+
+The parameter file is a manual example, not consumed by the pipeline. It reads
+required environment variables including `PDA_WEB_IMAGE`, the four `PDA_AUTH_*`
+values, and `PDA_AZURE_OPENAI_ENDPOINT`. Direct deployment bypasses writer stop/start
+coordination; prefer the scripts.
 
 ## Configuration reference
 
@@ -197,11 +224,15 @@ Environment variables read by the deployment scripts
 | `PDA_OLLAMA_MODEL` | no | `llama3.1` | Ollama model |
 | `PDA_OLLAMA_PROFILE` | no | `Consumption-GPU-NC8as-T4` | GPU workload profile |
 | `PDA_DEPLOY_AZURE_OPENAI` | no | `false` | Provision Azure OpenAI for the Public route |
-| `PDA_AZURE_OPENAI_ENDPOINT` | no | — | Existing Azure OpenAI v1 endpoint (instead of provisioning) |
+| `PDA_AZURE_OPENAI_ENDPOINT` | no | — | Existing endpoint, exactly `https://<resource>.openai.azure.com/openai/v1` (no trailing slash); the deploy script rejects other forms |
 | `PDA_AZURE_OPENAI_DEPLOYMENT` | no | `gpt-4o-mini` | Deployment name for the Public route |
 | `PDA_AZURE_OPENAI_MODEL` | no | `gpt-4o-mini` | Model to deploy when provisioning |
 | `DEPLOYER_PRINCIPAL_ID` | no | — | Grants KV Secrets Officer to the deployer |
 | `PDA_WEB_IMAGE` | no | derived | Full image ref (set from the build step) |
+| `PDA_AUTH_TENANT_ID` | yes | — | Workflow maps from `AZURE_TENANT_ID` |
+| `PDA_AUTH_CLIENT_ID` | yes | — | Browser app client ID |
+| `PDA_AUTH_CLIENT_SECRET` | yes | — | Secure EasyAuth credential |
+| `PDA_AUTH_TOKEN_STORE_SAS_URL` | yes | — | Secure token-store SAS |
 
 Bicep parameters are documented inline in [infra/main.bicep](../infra/main.bicep).
 
@@ -211,18 +242,36 @@ Run the **Teardown PDA Azure environment** workflow and type `delete` to confirm
 locally:
 
 ```powershell
+$env:PDA_DELETE_CONFIRM = 'delete'
 ./scripts/Remove-Infrastructure.ps1
 ```
 
 > Key Vault has **purge protection** enabled, so the vault is *recoverable* (not
 > immediately purgeable) until its soft-delete retention elapses. The compliance
-> archive's WORM policy also prevents blob deletion within the retention window.
+> archive is unused and its retention policy is unlocked. No immutable evidence is
+> produced. Policy locking requires separate retention approval and is not executed
+> by these scripts.
+
+## State recovery
+
+- New DEK envelopes retain the exact KEK version. Keep that key version enabled and
+  recoverable. Legacy raw-base64 wrapped DEKs fail closed rather than guessing a
+  version; recover the original key ID before an explicitly approved migration.
+- The server acquires `writer.lock` before protector/store initialization. After a
+  crash, verify all prior replicas/processes are stopped before an authorized
+  operator removes a stale lock. Do not remove a lock solely because an update fails.
+- Restart clears interrupted chat busy flags only after writer ownership is acquired.
+  A crash between ledger append and checkpoint publication can still require
+  restoration of a verified backup. Never fabricate a replacement checkpoint.
+- Tests use in-memory or temporary state. No migration of existing state, real
+  authentication, model execution, GPU validation or image CVE scan is implied.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | `az deployment` fails on GPU profile | No GPU quota in region | Request quota or set `PDA_DEPLOY_OLLAMA=false` |
+| First Ollama turn refuses with a provider timeout | The GPU replica scales to zero, so the first request also waits for a cold start and the model download, which exceeds the bounded provider attempt | Deploy with `ollamaMinReplicas=1` to keep the route warm (GPU cost applies), or send one throwaway turn to trigger the pull and retry after it completes |
 | Login step fails (`AADSTS700...`) | Federated subject mismatch | Ensure the federated credential subject matches the run (environment/branch) |
 | Template role-assignment error | Deployer lacks `User Access Administrator` | Grant it at the deployment scope |
 | Web app unhealthy after deploy | Image not built / wrong port | Confirm `Build-And-PushImage` ran; probe path is `/healthz` on `8110` |

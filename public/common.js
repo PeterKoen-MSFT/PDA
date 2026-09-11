@@ -18,6 +18,19 @@ async function api(url, method = 'GET', body) {
   if (!r.ok) throw new Error(data.message || data.error || `Request failed (${r.status})`);
   return data;
 }
+async function identityNavigation() {
+  const identity = await api('/api/me');
+  for (const link of document.querySelectorAll('.toplinks a')) {
+    const target = new URL(link.href).pathname;
+    link.hidden = target.includes('admin') ? !identity.roles.includes('Administrator')
+      : target.includes('compliance') ? !identity.roles.includes('Compliance')
+      : !identity.roles.some(role => ['User', 'Administrator'].includes(role));
+  }
+  if (!identity.local) {
+    const logout = node('a', 'Sign out'); logout.href = '/.auth/logout';
+    document.querySelector('.toplinks')?.append(logout);
+  }
+}
 function routeText(route, source) { return source === 'governance' ? 'Governance refusal' : route ? `GitHub Copilot SDK · ${route.name} / ${route.model}` : ''; }
 function message(parent, role, text, footer = '') {
   const article = node('article', '', `message message--${role}`);
@@ -41,6 +54,7 @@ async function stream(url, body, handle) {
 }
 
 export function mountChatPage() {
+  void identityNavigation().catch(() => {});
   let chat = null, busy = false, loaded = false, server;
   const prompt = $('promptInput'), level = $('confidentialitySelect'), transcript = $('chatTranscript');
   function controls() { prompt.disabled = busy || !loaded; level.disabled = busy || !!chat?.messages.length; $('sendButton').disabled = busy || !loaded || !prompt.value.trim(); $('newChatButton').disabled = busy || !loaded; }
@@ -89,6 +103,7 @@ export function mountChatPage() {
 }
 
 export function mountAdminPage() {
+  void identityNavigation().catch(() => {});
   let state, draft, dirty = false, busy = false;
   const bases = ['Public', 'Internal', 'Highly Confidential'], envBases = ['Public cloud', 'EU-only', 'On-premises'];
   const status = (text = '', tone = 'muted') => $('adminStatus').replaceChildren(badge(`Policy v${state?.active.payload.version ?? '…'}`, 'accent'), badge(dirty ? 'Unsaved draft' : 'Saved draft', dirty ? 'warning' : 'muted'), ...(text ? [badge(text, tone)] : []));
@@ -176,16 +191,16 @@ export function mountAdminPage() {
       field('Automatic fallback', input('euFallbackEnabled', settings.euRouting.fallbackEnabled, 'checkbox')));
     euOrder.forEach((routeId, index) => routing.append(field(`Priority ${index + 1}`, select(`euRouteOrder_${index}`, euChoices, routeId))));
     root.append(routing);
-    for (const [id, label, value] of [['publicRoute', 'Public model preference', settings.preferences.public], ['internalRoute', 'Internal model preference', settings.preferences.internal], ['highRoute', 'Highly Confidential model preference', settings.preferences.high]]) root.append(field(label, select(id, id === 'internalRoute' ? choices.filter(choice => ['mistral', 'simplellm'].includes(choice.id)) : choices, value)));
+    for (const [id, label, value] of [['publicRoute', 'Public model preference', settings.preferences.public], ['internalRoute', 'Internal model preference', settings.preferences.internal], ['highRoute', 'Highly Confidential model preference', settings.preferences.high]]) root.append(field(label, select(id, choices, value)));
     for (const r of Object.values(settings.routes)) {
       const remote = Object.prototype.hasOwnProperty.call(settings.secrets.routeApiKeyPresent, r.id);
       const pooled = euOrder.includes(r.id);
-      const note = remote ? 'Provider location is declared, not independently attested. Key encrypted for your Windows account.' : r.kind === 'ollama' ? 'Local Ollama execution.' : 'Existing Copilot sign-in · Public synthetic data only.';
+      const note = remote ? 'Provider location is declared, not independently attested. Key protected by the configured storage protector.' : r.kind === 'ollama' ? 'Ollama at the configured endpoint; hosting location determines residency.' : r.kind === 'azure' ? 'Azure OpenAI using managed identity in Azure; Public route only.' : 'Existing Copilot sign-in · Local hosting, Public synthetic data only.';
       const card = node('article', '', 'list-item'); card.append(node('h3', r.name), badge(r.geography), node('p', note, 'note'));
       card.append(field('Name', input(`routeName_${r.id}`, r.name)), field('Model', input(`routeModel_${r.id}`, r.model)), field('Endpoint (approved host)', input(`routeBaseUrl_${r.id}`, r.baseUrl)), field('Enabled', input(`routeEnabled_${r.id}`, r.enabled, 'checkbox')));
       if (pooled) { const cost = input(`routeCost_${r.id}`, r.costScore, 'number'); cost.min = '0'; cost.step = '0.001'; card.append(field('Relative cost score', cost)); }
       if (remote) { const key = input(`routeKey_${r.id}`, '', 'password'); key.autocomplete = 'new-password'; key.placeholder = settings.secrets.routeApiKeyPresent[r.id] ? 'Encrypted key stored · blank preserves it' : 'Enter API key'; card.append(field(`${r.name} API key`, key)); }
-      const result = node('div', '', 'note'); card.append(button('Probe / check model', async e => { e.target.disabled = true; try { const x = await api(`/api/routes/${r.id}/probe`, 'POST', {}); result.replaceChildren(badge(x.ok ? 'Model discovered' : 'Unavailable', x.ok ? 'success' : 'danger'), node('p', x.message), ...(x.models ? [details(`${x.models.length} available models`, x.models.map(m => m.name || m.id).join('\n'))] : [])); } catch(error) { result.textContent = error.message; } finally { e.target.disabled = false; } }), result);
+      const result = node('div', '', 'note'); card.append(button('Probe / check model', async e => { e.target.disabled = true; try { const x = await api(`/api/routes/${r.id}/probe`, 'POST', {}); result.replaceChildren(badge(x.ok ? 'Check passed' : 'Unavailable', x.ok ? 'success' : 'danger'), node('p', x.message), ...(x.models ? [details(`${x.models.length} available models`, x.models.map(m => m.name || m.id).join('\n'))] : [])); } catch(error) { result.textContent = error.message; } finally { e.target.disabled = false; } }), result);
       if (remote) card.append(button('Clear key', async () => { if (!confirm(`Remove the encrypted ${r.name} key?`)) return; try { await api('/api/settings', 'PUT', { clearRouteApiKeys: [r.id] }); await load(); status('Encrypted key removed', 'success'); } catch(e) { status(e.message, 'danger'); } }));
       root.append(card);
     }
@@ -213,6 +228,7 @@ export function mountAdminPage() {
 }
 
 export function mountCompliancePage() {
+  void identityNavigation().catch(() => {});
   let records = [], selected = null, verification;
   const filters = [['filterAgent', 'agentId', 'All agents'], ['filterChat', 'chatId', 'All chats'], ['filterLevel', 'level', 'All levels'], ['filterTool', 'toolId', 'All tools'], ['filterKind', 'kind', 'All events']];
   const title = r => ({ 'chat-created': 'Conversation started', 'chat-elevated': 'Protection increased', 'tool-elevation': 'Tool required higher protection', 'tool-withheld': 'Protected data withheld from previous model', 'model-authorized': 'Model permitted', 'model-egress-failed': 'Model route failed', 'model-route-fallback': 'Governed model fallback', 'tool-executed': 'Tool completed', 'tool-denied': 'Tool blocked', 'request-refused': 'Request refused', 'model-response': 'Agent answered', 'policy-published': 'Signed policy published' }[r.kind] || r.kind.replaceAll('-', ' '));

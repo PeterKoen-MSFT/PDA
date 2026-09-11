@@ -14,7 +14,7 @@ Write-Step "Setting active subscription to $($config.SubscriptionId)"
 Invoke-Az account set --subscription $config.SubscriptionId | Out-Null
 
 Write-Step 'Ensuring the Bicep CLI is available'
-Invoke-Az bicep version | Out-Null
+try { Invoke-Az bicep version | Out-Null } catch { Invoke-Az bicep install | Out-Null }
 
 Write-Step 'Azure context ready'
 Invoke-Az account show --output table

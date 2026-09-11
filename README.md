@@ -6,7 +6,7 @@
 
 This repository is a clean start for an enterprise agent governance demo. The [executive feedback](executive%20feedback.md) is the requirements baseline and takes precedence over the previous design. The agent will use the **GitHub Copilot SDK**, not NemoClaw, OpenClaw or OpenShell.
 
-The previous implementation and its documents are retained in the [legacy archive](archive/README.md). They are reference material, not an active application, implementation plan or compatibility requirement. The approved story now has a working local demo using the published **GitHub Copilot SDK 1.0.13**. The requirements below remain the product direction; the implementation's precise scope and verified behavior are described in [DEMO.md](DEMO.md).
+The approved story has a local demo using the published **GitHub Copilot SDK 1.0.13**. Historical designs are not an active application or compatibility requirement. The requirements below remain the product direction; implementation scope and previously verified local behavior are described in [docs/DEMO.md](docs/DEMO.md).
 
 ## Run the live demo
 
@@ -16,33 +16,29 @@ The previous implementation and its documents are retained in the [legacy archiv
 
 The backend is Node.js with plain HTML/CSS/JavaScript pages. No container or frontend build is required. Model answers come from the real SDK; weather and sales are fictional local services, and sending is dry-run only. Keys are encrypted for the current Windows user, outside the repository.
 
-See [setup, model configuration and walkthrough](DEMO.md). The signed ledger is tamper-evident, not immutable storage; participant credentials are issued by the demo authority, not the external model providers. The local UI assumes one trusted workstation operator, not production role-based authentication.
+See [model configuration and walkthrough](docs/DEMO.md). The signed ledger is tamper-evident, not immutable storage; participant credentials are issued by the demo authority, not the external model providers. The local UI assumes one trusted workstation operator, not production role-based authentication. Node 22.12 or later is required.
 
 ## Deploy to Azure
 
 An optional Azure deployment hosts the app on Azure Container Apps with Key Vault–backed
-at-rest encryption (replacing Windows DPAPI), an immutable compliance archive, and an
+at-rest encryption for secrets/signing keys (replacing Windows DPAPI), an unused archive container, and an
 optional serverless-GPU Ollama route — provisioned with Bicep and Azure Verified Modules,
 and shipped by GitHub Actions that call PowerShell scripts in [scripts/](scripts). The
 local demo above is unaffected; cloud behavior is enabled only through environment
 variables.
 
+Cloud mode requires Entra sign-in and application roles. Azure-hosted Ollama cannot
+satisfy on-premises requirements. Use synthetic data only. The archive has no uploader
+or locked policy; compilation and source tests are not deployment proof.
+
 - [Azure architecture](docs/azure-architecture.md)
 - [Azure deployment guide](docs/azure-deployment-guide.md)
 
-## Review the clickable mockup first
+## Approved demo story
 
-Open [the self-contained HTML mockup](mockup/index.html) in Microsoft Edge. No server, dependency installation or backend is required. All content is fictional and all outcomes are scripted; refresh the page to reset the preview.
-
-Use **Walk through the story** to select a numbered step, or switch directly between **User**, **Administrator** and **Compliance**. Settings edits are preview-only; **Publish mock v2** demonstrates the fixed policy change that disables public sending. Existing chats remain pinned until **Start agent on latest policy** creates a fresh context.
-
-1. **Administrator:** inspect the policy, protection matrices, catalog and synthetic acceptance details.
-2. **User:** start Public, look up weather, retrieve the confidential contract, ask a public follow-up, then attempt a public send. Observe elevation, retained protection and refusal.
-3. **User:** start a separate Public chat to demonstrate independent context. Expand **Other outcomes** for missing credentials, unavailable evidence, conflicting sovereignty and no compliant model.
-4. **Administrator → Versions:** publish mock v2, start the agent on the latest policy, select Public and attempt a public send to see the revised refusal.
-5. **Compliance:** filter the predetermined example records, inspect a chat timeline and participant credentials, then open verification and export previews.
-
-**Mockup approved:** the user approved its story and authorized the backend, with a simpler actual chat and separate Admin/Compliance pages. The mockup remains a static design reference; its compliance dataset is not the live ledger.
+The approved mockup story is implemented as a simple chat with separate Administrator
+and Compliance pages. Follow [docs/DEMO.md](docs/DEMO.md); the old static mockup is
+not part of this checkout.
 
 ## The story: useful agents without surrendering control
 
@@ -200,9 +196,7 @@ Additional implementation decisions include trusted classification, SDK model/eg
 ## Repository guide
 
 - [Executive feedback](executive%20feedback.md): authoritative requirements, preserved as supplied.
-- [Archive overview](archive/README.md): retained legacy material and cleanup provenance.
-- [Previous storyline](archive/legacy-demo/README.md) and [previous POC plan](archive/legacy-demo/POC-PLAN.md): historical context only.
 - [Working agreements](AGENTS.md): current development constraints for the clean start.
 - [License](LICENSE): retained project license.
 
-The active backend is [server.mjs](server.mjs), with governance, storage and SDK integration under app/ and separate browser views under public/. [DEMO.md](DEMO.md) records setup and current limitations. Archived code is not imported or built.
+The active backend is [server.mjs](server.mjs), with governance, storage and SDK integration under app/ and separate browser views under public/. [docs/DEMO.md](docs/DEMO.md) records the walkthrough and limitations. Archived code is not imported or built.

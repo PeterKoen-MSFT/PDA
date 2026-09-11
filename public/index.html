@@ -6,9 +6,11 @@
     <title>Cumulus Granitus · Chat</title>
     <script>
       (() => {
-        const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+        const param = new URLSearchParams(window.location.search).get("theme");
         const theme =
-          param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+          (param === "dark" || param === "light")
+            ? param
+            : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
         document.documentElement.setAttribute("data-theme", theme);
       })();
     </script>
