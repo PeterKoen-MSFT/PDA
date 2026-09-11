@@ -18,6 +18,18 @@ The backend is Node.js with plain HTML/CSS/JavaScript pages. No container or fro
 
 See [setup, model configuration and walkthrough](DEMO.md). The signed ledger is tamper-evident, not immutable storage; participant credentials are issued by the demo authority, not the external model providers. The local UI assumes one trusted workstation operator, not production role-based authentication.
 
+## Deploy to Azure
+
+An optional Azure deployment hosts the app on Azure Container Apps with Key Vault–backed
+at-rest encryption (replacing Windows DPAPI), an immutable compliance archive, and an
+optional serverless-GPU Ollama route — provisioned with Bicep and Azure Verified Modules,
+and shipped by GitHub Actions that call PowerShell scripts in [scripts/](scripts). The
+local demo above is unaffected; cloud behavior is enabled only through environment
+variables.
+
+- [Azure architecture](docs/azure-architecture.md)
+- [Azure deployment guide](docs/azure-deployment-guide.md)
+
 ## Review the clickable mockup first
 
 Open [the self-contained HTML mockup](mockup/index.html) in Microsoft Edge. No server, dependency installation or backend is required. All content is fictional and all outcomes are scripted; refresh the page to reset the preview.
