@@ -6,17 +6,19 @@ scripts under `scripts/`; the workflows only orchestrate them.
 
 ## Contents
 
-- [What gets deployed](#what-gets-deployed)
-- [Prerequisites](#prerequisites)
-- [1. Create the Entra app registration and federated credential](#1-create-the-entra-app-registration-and-federated-credential)
-- [2. Grant Azure permissions](#2-grant-azure-permissions)
-- [3. Configure GitHub secrets and variables](#3-configure-github-secrets-and-variables)
-- [4. Deploy via GitHub Actions](#4-deploy-via-github-actions)
-- [5. First-run configuration in the app](#5-first-run-configuration-in-the-app)
-- [Manual / local deployment](#manual--local-deployment)
-- [Configuration reference](#configuration-reference)
-- [Teardown](#teardown)
-- [Troubleshooting](#troubleshooting)
+- [PDA on Azure — Deployment Guide](#pda-on-azure--deployment-guide)
+  - [Contents](#contents)
+  - [What gets deployed](#what-gets-deployed)
+  - [Prerequisites](#prerequisites)
+  - [1. Create the Entra app registration and federated credential](#1-create-the-entra-app-registration-and-federated-credential)
+  - [2. Grant Azure permissions](#2-grant-azure-permissions)
+  - [3. Configure GitHub secrets and variables](#3-configure-github-secrets-and-variables)
+  - [4. Deploy via GitHub Actions](#4-deploy-via-github-actions)
+  - [5. First-run configuration in the app](#5-first-run-configuration-in-the-app)
+  - [Manual / local deployment](#manual--local-deployment)
+  - [Configuration reference](#configuration-reference)
+  - [Teardown](#teardown)
+  - [Troubleshooting](#troubleshooting)
 
 ## What gets deployed
 
