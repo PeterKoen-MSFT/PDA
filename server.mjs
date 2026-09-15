@@ -3,8 +3,9 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 
-import { AgentRunner } from './app/agent.mjs';
-import { ENVIRONMENTS, LEVELS, TOOLS, Governance } from './app/governance.mjs';
+import { AgentRunner, LEDGER_RECORDS_PER_TURN } from './app/agent.mjs';
+import { TOOLS, Governance } from './app/governance.mjs';
+import { DEPLOYMENT_SETTINGS } from './app/deployment-settings.mjs';
 import { Store } from './app/storage.mjs';
 
 const HOST = '127.0.0.1';
@@ -17,6 +18,7 @@ const STATE_DIR = resolveStateDir();
 const STATIC_FILES = new Map([
   ['/styles.css', path.join(PROJECT_ROOT, 'public', 'styles.css')],
   ['/common.js', path.join(PROJECT_ROOT, 'public', 'common.js')],
+  ['/demo-stories.js', path.join(PROJECT_ROOT, 'public', 'demo-stories.js')],
   ['/chat.js', path.join(PROJECT_ROOT, 'public', 'chat.js')],
   ['/admin.js', path.join(PROJECT_ROOT, 'public', 'admin.js')],
   ['/compliance.js', path.join(PROJECT_ROOT, 'public', 'compliance.js')],
@@ -31,9 +33,6 @@ const HTML_FILES = new Map([
   ['/admin.html', path.join(PROJECT_ROOT, 'public', 'admin.html')],
   ['/compliance', path.join(PROJECT_ROOT, 'public', 'compliance.html')],
   ['/compliance.html', path.join(PROJECT_ROOT, 'public', 'compliance.html')],
-  ['/mockup', path.join(PROJECT_ROOT, 'mockup', 'index.html')],
-  ['/mockup/', path.join(PROJECT_ROOT, 'mockup', 'index.html')],
-  ['/mockup/index.html', path.join(PROJECT_ROOT, 'mockup', 'index.html')],
 ]);
 
 const store = new Store(STATE_DIR);
@@ -244,11 +243,47 @@ function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
+function sanitizedText(value, limit) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return text.slice(0, limit);
+}
+
+function sanitizeActivity(activity) {
+  if (!activity || typeof activity !== 'object') return null;
+  const statuses = new Set(['running', 'complete', 'failed', 'stopped']);
+  const state = value => ({ level: sanitizedText(value?.level, 80), environment: sanitizedText(value?.environment, 80) });
+  const transition = activity.transition && typeof activity.transition === 'object' ? {
+    from: state(activity.transition.from),
+    to: state(activity.transition.to),
+    confidentialityChanged: activity.transition.confidentialityChanged === true,
+    environmentChanged: activity.transition.environmentChanged === true,
+  } : null;
+  return {
+    id: sanitizedText(activity.id, 80),
+    kind: sanitizedText(activity.kind, 40),
+    title: sanitizedText(activity.title, 120),
+    ...(activity.detail ? { detail: sanitizedText(activity.detail, 320) } : {}),
+    status: statuses.has(activity.status) ? activity.status : 'complete',
+    at: sanitizedText(activity.at, 40),
+    ...(activity.completedAt ? { completedAt: sanitizedText(activity.completedAt, 40) } : {}),
+    ...(Number.isFinite(activity.durationMs) ? { durationMs: Math.max(0, Math.min(activity.durationMs, 300_000)) } : {}),
+    level: sanitizedText(activity.level, 80),
+    environment: sanitizedText(activity.environment, 80),
+    ...(transition ? { transition } : {}),
+  };
+}
+
 function sanitizeChat(chat) {
   if (!chat) {
     return null;
   }
   const { ownerHash, ...rest } = clone(chat);
+  if (Array.isArray(rest.messages)) {
+    rest.messages = rest.messages.map(message => ({
+      ...message,
+      ...(Array.isArray(message.activity) ? { activity: message.activity.map(sanitizeActivity).filter(Boolean) } : {}),
+    }));
+  }
   return rest;
 }
 
@@ -257,6 +292,7 @@ function sanitizeStreamEvent(event) {
   if (next && typeof next === 'object' && next.chat) {
     next.chat = sanitizeChat(next.chat);
   }
+  if (next?.type === 'activity') next.activity = sanitizeActivity(next.activity);
   return next;
 }
 
@@ -281,7 +317,21 @@ function apiState() {
     levels: governance.levels(),
     environments: governance.environments(),
     vocabulary: governance.vocabulary(),
+    deployment: {
+      policy: {
+        initialLevelId: DEPLOYMENT_SETTINGS.policy.initialLevelId,
+        initialEnvironmentByBaseLevel: clone(DEPLOYMENT_SETTINGS.policy.initialEnvironmentByBaseLevel),
+        baselineLevelIds: [...DEPLOYMENT_SETTINGS.policy.baselineLevelIds],
+        baselineEnvironmentIds: [...DEPLOYMENT_SETTINGS.policy.baselineEnvironmentIds],
+      },
+      agents: DEPLOYMENT_SETTINGS.agents.agents.map(agent => ({ id: agent.id, name: agent.name })),
+      defaultAgentId: DEPLOYMENT_SETTINGS.agents.defaultAgentId,
+    },
     status: sanitizeStatus(),
+    capacity: {
+      chats: governance.capacity(),
+      ledger: store.capacity(),
+    },
   };
 }
 
@@ -338,7 +388,7 @@ function extractInlineScriptHashes(html) {
   const scriptRe = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi;
   let match;
   while ((match = scriptRe.exec(html))) {
-    const script = match[1];
+    const script = match[1].replace(/\r\n?/g, '\n');
     if (!script) {
       continue;
     }
@@ -347,26 +397,7 @@ function extractInlineScriptHashes(html) {
   return hashes;
 }
 
-function isMockupFile(filePath) {
-  return filePath.endsWith(path.join('mockup', 'index.html'));
-}
-
-function buildContentSecurityPolicy(html, filePath) {
-  if (isMockupFile(filePath)) {
-    return [
-      "default-src 'none'",
-      "base-uri 'none'",
-      "object-src 'none'",
-      "form-action 'none'",
-      "connect-src 'none'",
-      "frame-src 'none'",
-      "frame-ancestors 'none'",
-      "img-src 'self' data:",
-      "style-src 'unsafe-inline'",
-      "script-src 'unsafe-inline'",
-    ].join('; ');
-  }
-
+function buildContentSecurityPolicy(html) {
   const scriptHashes = extractInlineScriptHashes(html);
   return [
     "default-src 'none'",
@@ -382,7 +413,7 @@ function buildContentSecurityPolicy(html, filePath) {
 }
 
 function setSecurityHeaders(res, filePath, html) {
-  res.setHeader('content-security-policy', buildContentSecurityPolicy(html, filePath));
+  res.setHeader('content-security-policy', buildContentSecurityPolicy(html));
   res.setHeader('cache-control', 'no-store');
   res.setHeader('x-content-type-options', 'nosniff');
   res.setHeader('referrer-policy', 'no-referrer');
@@ -437,9 +468,7 @@ async function handleChatCreate(req, res, capability) {
     sendJson(res, parsed.status, { error: parsed.error });
     return;
   }
-  const body = parsed.value || {};
-  const level = String(body.level ?? body.initialLevel ?? 'Public');
-  const chat = governance.newChat(level);
+  const chat = governance.newChat();
   chat.ownerHash = capability.ownerHash;
   chat.busy = false;
   governance.updateChat(chat);
@@ -481,6 +510,13 @@ async function handleChatMessage(req, res, capability, chatId) {
   }
   if (prompt.length > 8000) {
     sendJson(res, 413, { error: 'prompt_too_large' });
+    return;
+  }
+
+  try {
+    store.assertLedgerCapacity(LEDGER_RECORDS_PER_TURN);
+  } catch (error) {
+    sendJson(res, 409, { error: error.code || 'ledger_capacity', message: error.message });
     return;
   }
 
@@ -554,8 +590,23 @@ async function handleApi(req, res, capability, parsedUrl) {
     return;
   }
 
+  if (req.method === 'POST' && pathname === '/api/demo/preflight') {
+    assertSameOrigin(req);
+    const parsed = await extractJsonBody(req);
+    if (!parsed.ok) return sendJson(res, parsed.status, { error: parsed.error });
+    sendJson(res, 200, await runner.demoPreflight());
+    return;
+  }
+
   if (req.method === 'POST' && pathname === '/api/chats') {
     await handleChatCreate(req, res, capability);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/chats/latest') {
+    const policyVersion = governance.active()?.payload?.version;
+    const chat = governance.latestOwnedChat(capability.ownerHash, policyVersion);
+    sendJson(res, 200, sanitizeChat(chat));
     return;
   }
 

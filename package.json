@@ -5,7 +5,8 @@
   "type": "module",
   "main": "server.mjs",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "@github/copilot-sdk": "1.0.13",
