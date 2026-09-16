@@ -38,6 +38,7 @@ two scheduled tasks:
 ## Prerequisites
 
 - PowerShell with the Az modules: `Install-Module Az -Scope CurrentUser`
+- The Bicep CLI (Az PowerShell uses it to compile the templates and does not install it automatically): `winget install Microsoft.Bicep` or `az bicep install`
 - `Connect-AzAccount` with rights to create the resource group and resources
 - A basic-auth password with no `"` characters in the config file
 
