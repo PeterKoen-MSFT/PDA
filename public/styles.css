@@ -872,6 +872,10 @@ h2 {
   color: var(--cp-danger);
 }
 
+.alert--warning {
+  border-color: var(--cp-warning);
+}
+
 .alert--success {
   border-color: var(--cp-success);
   color: var(--cp-success);
