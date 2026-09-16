@@ -70,9 +70,15 @@ duplicates. When it finishes it prints the public URL, the RDP host, and the
 basic-auth user.
 
 First run: RDP to the printed host as the VM administrator. The demo starts
-automatically at logon. Open the **Administrator** page to enter the Mistral key
-and sign in to Copilot, exactly as on-premises. Certificate issuance for the
-public name takes about a minute; until then the browser may show a TLS warning.
+automatically at logon. Sign in to GitHub Copilot once (the CLI is pre-installed;
+the sign-in is per-user and matches on-premises):
+
+```powershell
+copilot        # then type /login and complete the device-code sign-in, then /exit
+```
+
+Open the **Administrator** page to enter the Mistral key. Certificate issuance for
+the public name takes about a minute; until then the browser may show a TLS warning.
 
 Then browse to:
 

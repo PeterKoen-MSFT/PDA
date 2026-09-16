@@ -165,6 +165,12 @@ try {
 }
 if ($npmExit -ne 0) { throw "npm install failed with exit code $npmExit" }
 
+# --- GitHub Copilot CLI (provides the logged-in session the SDK reads for the Copilot route) ---
+# Installed here; the interactive device-code sign-in (copilot -> /login) is done once by the operator.
+Write-Step 'Installing the GitHub Copilot CLI'
+& (Join-Path $NodeDir 'npm.cmd') install -g '@github/copilot' --no-audit --no-fund --cache $npmCache
+if ($LASTEXITCODE -ne 0) { Write-Step "Copilot CLI install failed (exit $LASTEXITCODE); install it manually with 'npm install -g @github/copilot'." }
+
 # --- Caddy configuration: basic auth + HTTPS + reverse proxy to the app ---------
 Write-Step 'Writing Caddy configuration'
 $hash = & $caddyExe hash-password --plaintext $BasicAuthPassword
