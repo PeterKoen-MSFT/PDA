@@ -193,13 +193,23 @@ foreach ($rule in @(@{ Name = 'PDA-HTTPS'; Port = 443 }, @{ Name = 'PDA-HTTP'; P
 
 # --- Pre-pull the Ollama model (non-fatal: falls back to first-use pull) --------
 Write-Step "Pre-pulling Ollama model $OllamaModel"
+$serve = $null
 try {
     $serve = Start-Process -FilePath $ollamaExe -ArgumentList 'serve' -PassThru -WindowStyle Hidden
-    Start-Sleep -Seconds 8
+    $ready = $false
+    for ($i = 0; $i -lt 30 -and -not $ready; $i++) {
+        Start-Sleep -Seconds 2
+        & $ollamaExe list *> $null
+        if ($LASTEXITCODE -eq 0) { $ready = $true }
+    }
+    if (-not $ready) { throw 'Ollama server did not become ready in time.' }
     & $ollamaExe pull $OllamaModel
-    if ($serve -and -not $serve.HasExited) { Stop-Process -Id $serve.Id -Force -ErrorAction SilentlyContinue }
+    if ($LASTEXITCODE -ne 0) { throw "ollama pull exited with code $LASTEXITCODE" }
+    Write-Step "Model $OllamaModel is ready."
 } catch {
-    Write-Step "Model pre-pull skipped ($($_.Exception.Message)); it will be pulled on first use."
+    Write-Step "Model pre-pull skipped ($($_.Exception.Message)); pull it manually with 'ollama pull $OllamaModel'."
+} finally {
+    if ($serve -and -not $serve.HasExited) { Stop-Process -Id $serve.Id -Force -ErrorAction SilentlyContinue }
 }
 
 # --- Scheduled tasks -----------------------------------------------------------
