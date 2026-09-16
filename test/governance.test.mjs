@@ -183,6 +183,17 @@ test('public read tools use a stricter route while public egress remains blocked
   assert.equal(egress.reason, 'PUBLIC_TOOL_BLOCKED_FOR_PROTECTED_CHAT');
 }));
 
+test('public chats that elevate from a named region to on-premises retain an authorized route', () => withGovernance(({ governance }) => {
+  const chat = governance.newChat('Public');
+  governance.classify(chat, 'Check Verde Supply Pulse for the Brazil supply picture.');
+  governance.classify(chat, 'Search CivicBridge Network for NGO Community coverage in Brazil.');
+
+  assert.equal(chat.level, 'Public');
+  assert.equal(chat.sovereignty, 'On-premises');
+  assert.deepEqual(chat.scope.partnerNetworkIds, ['partner-ngo-community']);
+  assert.deepEqual(governance.routePlan(chat).routes.map(route => route.id), ['ollama']);
+}));
+
 test('tool exposure is catalog, implementation, and scope relevant', () => withGovernance(({ governance }) => {
   const chat = governance.newChat('Public');
   const before = governance.exposedTools(chat).map((tool) => tool.id);

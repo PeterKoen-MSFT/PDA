@@ -678,6 +678,7 @@ export class Governance {
     const allowedEnvironments = this._allowedEntries(policy, 'allowedEnvironments', state.level).map(id => this._baseEnvironmentId(id, policy));
     const environmentId = this._resolveEnvironmentId(state.sovereignty, policy);
     const namedRestrictedEnvironment = this._isNamedRestrictedEnvironment(environmentId, policy);
+    const environmentAware = this._rankSovereignty(environmentId, policy) > 0;
     const useEuPool = !namedRestrictedEnvironment && EU_POOL_ROUTE_IDS.includes(preference);
     const configuredPool = [...settings.euRouting.order];
     const poolIndex = new Map(configuredPool.map((routeId, index) => [routeId, index]));
@@ -685,10 +686,10 @@ export class Governance {
       ? configuredPool.sort((left, right) => settings.routes[left].costScore - settings.routes[right].costScore
         || poolIndex.get(left) - poolIndex.get(right))
       : configuredPool;
-    const compatibleEnvironmentRoutes = namedRestrictedEnvironment
+    const compatibleEnvironmentRoutes = environmentAware
       ? [...ROUTE_IDS].filter(routeId => this._environmentSatisfies(settings.routes[routeId]?.geography, environmentId, policy))
       : [];
-    const routeIds = namedRestrictedEnvironment
+    const routeIds = environmentAware
       ? [...new Set([preference, ...orderedPool, ...compatibleEnvironmentRoutes])]
       : useEuPool
         ? orderedPool
@@ -741,7 +742,7 @@ export class Governance {
       throw this._routeError(first?.code ?? 'NO_AUTHORIZED_ROUTE', first?.message ?? `No route satisfies ${state.sovereignty}`);
     }
     return {
-      strategy: namedRestrictedEnvironment ? `environment-aware-${settings.euRouting.strategy}` : useEuPool ? settings.euRouting.strategy : 'preference',
+      strategy: environmentAware ? `environment-aware-${settings.euRouting.strategy}` : useEuPool ? settings.euRouting.strategy : 'preference',
       fallbackEnabled: (useEuPool || compatibleEnvironmentRoutes.length > 1) && settings.euRouting.fallbackEnabled,
       routes,
       skipped,
