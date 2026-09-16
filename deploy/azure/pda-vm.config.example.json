@@ -1,0 +1,14 @@
+{
+  "subscriptionId": "",
+  "resourceGroup": "pda-vm-rg",
+  "location": "swedencentral",
+  "namePrefix": "pda",
+  "vmSize": "Standard_E8s_v5",
+  "adminUsername": "pdaadmin",
+  "dnsLabel": "",
+  "allowedSourceAddressPrefix": "*",
+  "basicAuthUsername": "demo",
+  "basicAuthPassword": "change-me-before-deploy",
+  "ollamaModel": "qwen2.5:7b",
+  "nodeVersion": "22.11.0"
+}
