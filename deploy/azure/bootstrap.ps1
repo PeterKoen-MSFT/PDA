@@ -179,7 +179,11 @@ $Fqdn {
 	basic_auth {
 		$BasicAuthUser $hash
 	}
-	reverse_proxy 127.0.0.1:8110
+	# The app enforces a loopback Host/Origin; rewrite them so it accepts proxied requests unchanged.
+	reverse_proxy 127.0.0.1:8110 {
+		header_up Host 127.0.0.1:8110
+		header_up Origin http://127.0.0.1:8110
+	}
 }
 "@
 Set-Content -Path $CaddyFile -Value $caddyConfig -Encoding utf8
