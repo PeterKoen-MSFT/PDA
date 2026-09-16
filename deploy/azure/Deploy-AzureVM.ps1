@@ -163,6 +163,10 @@ $deployment = New-AzResourceGroupDeployment `
 
 Remove-Item $appZip -Force -ErrorAction SilentlyContinue
 
+if ($deployment.ProvisioningState -ne 'Succeeded' -or -not $deployment.Outputs -or -not $deployment.Outputs.ContainsKey('publicUrl')) {
+    throw "Deployment did not complete successfully (state: $($deployment.ProvisioningState)). RDP to the VM and check the bootstrap log at C:\PDA\logs\bootstrap.log."
+}
+
 Write-Host ''
 Write-Host '==================================================================='
 Write-Host ' Deployment complete.'

@@ -153,8 +153,17 @@ $env:PDA_DEPENDENCIES = $DepsDir
   }
 }
 '@ | Set-Content -Path (Join-Path $DepsDir 'package.json') -Encoding utf8
-& (Join-Path $NodeDir 'npm.cmd') install --prefix $DepsDir --no-audit --no-fund
-if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
+# npm running as SYSTEM needs its global and cache folders to exist, else it fails ENOENT (-4058).
+$npmCache = Join-Path $Root 'npm-cache'
+New-Item -ItemType Directory -Path (Join-Path $env:APPDATA 'npm'), $npmCache -Force | Out-Null
+Push-Location $DepsDir
+try {
+    & (Join-Path $NodeDir 'npm.cmd') install --no-audit --no-fund --cache $npmCache
+    $npmExit = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($npmExit -ne 0) { throw "npm install failed with exit code $npmExit" }
 
 # --- Caddy configuration: basic auth + HTTPS + reverse proxy to the app ---------
 Write-Step 'Writing Caddy configuration'
