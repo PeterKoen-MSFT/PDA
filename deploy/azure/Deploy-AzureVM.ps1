@@ -61,7 +61,7 @@ $allowedSource   = Get-ConfigValue -Name 'allowedSourceAddressPrefix' -Default '
 $basicAuthUser   = Get-ConfigValue -Name 'basicAuthUsername' -Required
 $basicAuthPass   = Get-ConfigValue -Name 'basicAuthPassword' -Required
 $ollamaModel     = Get-ConfigValue -Name 'ollamaModel' -Default 'qwen2.5:7b'
-$nodeVersion     = Get-ConfigValue -Name 'nodeVersion' -Default '22.11.0'
+$nodeVersion     = Get-ConfigValue -Name 'nodeVersion' -Default '22.12.0'
 $dnsLabelConfig  = Get-ConfigValue -Name 'dnsLabel'
 
 $tags = @{ SecurityControl = 'Ignore' }

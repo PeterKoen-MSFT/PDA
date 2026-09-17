@@ -26,7 +26,7 @@ param(
     [Parameter(Mandatory)] [string] $AdminUsername,
     [Parameter(Mandatory)] [string] $AdminPasswordB64,
     [string] $OllamaModel = 'qwen2.5:7b',
-    [string] $NodeVersion = '22.11.0',
+    [string] $NodeVersion = '22.12.0',
     [string] $PwshVersion = '7.4.6'
 )
 
@@ -103,8 +103,9 @@ Add-MachinePath $PwshDir
 
 # --- Node.js -------------------------------------------------------------------
 $nodeExe = Join-Path $NodeDir 'node.exe'
-if (-not (Test-Path $nodeExe)) {
-    Write-Step "Installing Node.js $NodeVersion"
+$nodeCurrent = if (Test-Path $nodeExe) { (& $nodeExe --version).TrimStart('v') } else { '' }
+if ($nodeCurrent -ne $NodeVersion) {
+    Write-Step "Installing Node.js $NodeVersion (current: $(if ($nodeCurrent) { $nodeCurrent } else { 'none' }))"
     $zip = Join-Path $env:TEMP 'node.zip'
     Invoke-WebRequest -Uri "https://nodejs.org/dist/v$NodeVersion/node-v$NodeVersion-win-x64.zip" -OutFile $zip
     Expand-ToDirectory -ZipPath $zip -Destination $NodeDir -Flatten
@@ -247,9 +248,9 @@ Unregister-ScheduledTask -TaskName 'PDA-Demo' -Confirm:$false -ErrorAction Silen
 $demoSupervisor = "& '$AppDir\startdemo.ps1'; for (`$i = 0; `$i -lt 24 -and -not (Get-NetTCPConnection -LocalPort 8110 -State Listen -ErrorAction SilentlyContinue); `$i++) { Start-Sleep -Seconds 5 }; while (Get-NetTCPConnection -LocalPort 8110 -State Listen -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 30 }"
 $demoAction    = New-ScheduledTaskAction -Execute $pwshExe -Argument "-ExecutionPolicy Bypass -NoProfile -Command `"$demoSupervisor`"" -WorkingDirectory $AppDir
 $demoTrigger   = New-ScheduledTaskTrigger -AtStartup
-$demoPrincipal = New-ScheduledTaskPrincipal -UserId $AdminUsername -LogonType Password -RunLevel Highest
 $demoSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName 'PDA-Demo' -Action $demoAction -Trigger $demoTrigger -Principal $demoPrincipal -Settings $demoSettings -User $AdminUsername -Password $AdminPassword | Out-Null
+# -User/-Password (batch logon) and -Principal are mutually exclusive parameter sets; pass RunLevel here.
+Register-ScheduledTask -TaskName 'PDA-Demo' -Action $demoAction -Trigger $demoTrigger -Settings $demoSettings -User $AdminUsername -Password $AdminPassword -RunLevel Highest | Out-Null
 Start-ScheduledTask -TaskName 'PDA-Demo'
 
 Write-Step 'Bootstrap complete.'

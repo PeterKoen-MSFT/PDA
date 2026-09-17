@@ -57,7 +57,7 @@ param basicAuthPassword string
 param ollamaModel string = 'qwen2.5:7b'
 
 @description('Node.js version installed on the VM (Windows x64 zip).')
-param nodeVersion string = '22.11.0'
+param nodeVersion string = '22.12.0'
 
 @description('PowerShell 7 version installed on the VM (used to run startdemo.ps1, matching on-premises).')
 param pwshVersion string = '7.4.6'
