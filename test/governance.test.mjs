@@ -169,6 +169,31 @@ test('tool arguments cannot classify scope and result conflicts are withheld bef
   assert.equal(chat.sovereignty, 'region-japan');
 }));
 
+test('public read tools use a stricter route while public egress remains blocked', () => withGovernance(({ governance }) => {
+  const chat = governance.newChat('Public');
+  governance.classify(chat, 'Use the CISPE Cloud Registry.');
+
+  const read = governance.toolDecision(chat, 'eurotrust_atlas', { query: 'Cross-check residency evidence.' });
+  assert.equal(read.allowed, true);
+  assert.equal(read.route.id, 'ollama');
+  assert.equal(chat.sovereignty, 'region-eu');
+
+  const egress = governance.toolDecision(chat, 'public_send', { recipient: 'partner@example.test', message: 'EU summary' });
+  assert.equal(egress.allowed, false);
+  assert.equal(egress.reason, 'PUBLIC_TOOL_BLOCKED_FOR_PROTECTED_CHAT');
+}));
+
+test('public chats that elevate from a named region to on-premises retain an authorized route', () => withGovernance(({ governance }) => {
+  const chat = governance.newChat('Public');
+  governance.classify(chat, 'Check Verde Supply Pulse for the Brazil supply picture.');
+  governance.classify(chat, 'Search CivicBridge Network for NGO Community coverage in Brazil.');
+
+  assert.equal(chat.level, 'Public');
+  assert.equal(chat.sovereignty, 'On-premises');
+  assert.deepEqual(chat.scope.partnerNetworkIds, ['partner-ngo-community']);
+  assert.deepEqual(governance.routePlan(chat).routes.map(route => route.id), ['ollama']);
+}));
+
 test('tool exposure is catalog, implementation, and scope relevant', () => withGovernance(({ governance }) => {
   const chat = governance.newChat('Public');
   const before = governance.exposedTools(chat).map((tool) => tool.id);
@@ -240,6 +265,27 @@ test('historical EU-only policy remains signed while its draft is environment-mi
   }
 });
 
+test('new-schema draft does not inherit historical route scope declarations', () => withGovernance(({ governance }) => {
+  const base = governance._createDefaultPolicy(1);
+  base.routeScopeDeclarations = {
+    mistral: {
+      regionIds: ['region-eu'],
+      basis: 'provider-declared',
+      attested: false,
+      statement: 'Historical EU declaration.',
+    },
+  };
+  const source = structuredClone(base);
+  delete source.routeScopeDeclarations;
+  source.version = 2;
+  source.odrl = governance._buildOdrl(source);
+
+  const normalized = governance._normalizePolicyDraft(source, base);
+
+  assert.equal(normalized.routeScopeDeclarations, undefined);
+  assert.equal(normalized.routeEnvironmentDeclarations.mistral.basis, 'provider-declared');
+}));
+
 test('capacity APIs report bounded remaining work', () => withGovernance(({ governance, store }) => {
   assert.deepEqual(governance.capacity(), { used: 0, limit: 200, remaining: 200 });
   const before = store.capacity();
@@ -271,6 +317,13 @@ test('protection-driven execution remains bounded to two attempts', () => {
   assert.equal(DEMO_STORIES.reduce((total, story) => total + story.steps.length, 0), DEMO_STORY_STEP_COUNT);
   assert.equal(agent.DEMO_PREFLIGHT_LEDGER_RESERVE, DEMO_STORY_STEP_COUNT * agent.LEDGER_RECORDS_PER_TURN);
 });
+
+test('local provider attempts can use the bounded turn while remote attempts remain capped', () => withGovernance(({ governance, store }) => {
+  const runner = new agent.AgentRunner(governance, store);
+  const deadline = Date.now() + 120_000;
+  assert.ok(runner.providerAttemptTimeout({ kind: 'ollama' }, deadline) > 110_000);
+  assert.ok(runner.providerAttemptTimeout({ kind: 'openai-compatible' }, deadline) <= 60_000);
+}));
 
 test('activity traces isolate an environment-only protection transition', () => withGovernance(({ governance, store }) => {
   const runner = new agent.AgentRunner(governance, store);
@@ -363,6 +416,47 @@ test('chat refresh restores only conversations on the active policy', () => {
   assert.equal(storyUi.shouldRestoreChat({ policyVersion: 7 }, 7), true);
   assert.equal(storyUi.shouldRestoreChat({ policyVersion: 5 }, 7), false);
   assert.equal(storyUi.shouldRestoreChat(null, 7), false);
+});
+
+test('expected demo policy decisions explain the block without presenting a demo failure', () => {
+  const error = Object.assign(new Error('This chat already uses Korea and cannot switch to Japan.'), { code: 'ENVIRONMENT_CONFLICT' });
+  const text = agent.expectedDemoPolicyDecisionText(error, { level: 'Internal', sovereigntyName: 'Korea' });
+  assert.equal(agent.isExpectedDemoPolicyDecision(error), true);
+  assert.match(text, /^Expected demo policy decision/);
+  assert.match(text, /already uses Korea and cannot switch to Japan/);
+  assert.match(text, /Policy code: ENVIRONMENT_CONFLICT/);
+  assert.match(text, /protection remains Internal · Korea/);
+  assert.match(text, /not a demo failure/);
+  assert.equal(storyUi.routeText(null, 'governance', error.code, true), 'Expected demo policy decision · ENVIRONMENT_CONFLICT');
+  assert.equal(storyUi.routeText(null, 'governance', 'provider_unavailable'), 'Request stopped · provider_unavailable');
+});
+
+test('runner persists an expected environment conflict as a demo policy decision without model execution', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pda-policy-decision-test-'));
+  try {
+    const store = new Store(stateDir);
+    const governance = new Governance(store);
+    const runner = new agent.AgentRunner(governance, store);
+    const chat = governance.newChat('Public');
+    governance.classify(chat, 'Use Korea data.');
+    const events = [];
+
+    await runner.run(chat, 'Compare this with Japan before I answer.', event => events.push(event));
+
+    const response = chat.messages.at(-1);
+    assert.equal(response.source, 'governance');
+    assert.equal(response.code, 'ENVIRONMENT_CONFLICT');
+    assert.equal(response.expectedDemoDecision, true);
+    assert.match(response.content, /already uses Korea and cannot switch to Japan/);
+    assert.match(response.content, /not a demo failure/);
+    assert.equal(response.activity.at(-1).kind, 'policy-decision');
+    assert.equal(response.activity.at(-1).status, 'complete');
+    assert.match(storyUi.activityTraceSummary(response.activity), /^Completed/);
+    assert.equal(events.find(event => event.type === 'message')?.expectedDemoDecision, true);
+    assert.equal(store.records().findLast(record => record.kind === 'request-refused')?.outcome, 'denied');
+  } finally {
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
 });
 
 test('all six demo stories reach their declared governance states', () => withGovernance(({ governance }) => {

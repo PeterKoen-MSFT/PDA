@@ -25,3 +25,4 @@ docs/governed-agent.mp4
 
 # Azure VM deployment config holds the basic-auth password.
 deploy/azure/pda-vm.config.json
+*.mkv

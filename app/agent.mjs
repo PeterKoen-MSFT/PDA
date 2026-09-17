@@ -10,6 +10,7 @@ const SDK_VERSION = '1.0.13';
 const AGENT_BY_ID = new Map(DEPLOYMENT_SETTINGS.agents.agents.map(agent => [agent.id, agent]));
 const ROUTE_BY_ID = new Map(DEPLOYMENT_SETTINGS.models.routes.map(route => [route.id, route]));
 const DEFAULT_AGENT = AGENT_BY_ID.get(DEPLOYMENT_SETTINGS.agents.defaultAgentId);
+const DEMO_POLICY_DECISION_CODES = new Set(DEMO_STORIES.flatMap(story => story.steps.map(step => step.expect.code).filter(Boolean)));
 export const MAX_PROTECTION_ATTEMPTS = DEFAULT_AGENT.runtime.maxProtectionAttempts;
 export const LEDGER_RECORDS_PER_TURN = DEFAULT_AGENT.runtime.ledgerRecordsPerTurn;
 export const DEMO_PREFLIGHT_LEDGER_RESERVE = DEMO_STORY_STEP_COUNT * LEDGER_RECORDS_PER_TURN;
@@ -19,6 +20,16 @@ const ACTIVITY_TITLE_LIMIT = 120;
 const ACTIVITY_DETAIL_LIMIT = 320;
 const dependencies = process.env.PDA_DEPENDENCIES || path.join(process.env.LOCALAPPDATA, 'PDA', 'sdk-demo', 'dependencies');
 const failure = (code, message) => Object.assign(new Error(message), { code });
+export const isExpectedDemoPolicyDecision = error => DEMO_POLICY_DECISION_CODES.has(error?.code);
+export function expectedDemoPolicyDecisionText(error, chat) {
+  const level = chat?.levelName || chat?.level || 'the current confidentiality';
+  const environment = chat?.sovereigntyName || chat?.sovereignty || 'the current environment';
+  return [
+    'Expected demo policy decision',
+    `${error.message} Policy code: ${error.code}.`,
+    `The requested action was blocked before execution, no tool data was released, and protection remains ${level} · ${environment}. This is the policy control working as designed, not a demo failure.`,
+  ].join('\n');
+}
 const bounded = async (response, limit = 2 * 1024 * 1024) => {
   let size = 0; const chunks = [];
   for await (const chunk of response.body) {
@@ -200,6 +211,10 @@ export class AgentRunner {
     return `${route.name} rejected the request (HTTP ${status}).`;
   }
   canFallbackStatus(status) { return [402, 404, 408, 409, 425, 429].includes(status) || status >= 500; }
+  providerAttemptTimeout(route, deadline) {
+    const remaining = Math.max(1, deadline - Date.now());
+    return route.kind === 'ollama' ? remaining : Math.min(60_000, remaining);
+  }
   async probe(id) {
     if (this.activeRun) throw failure('busy', 'Wait for the current chat turn before checking models.');
     const currentRoute = this.governance.settings().routes[id];
@@ -344,13 +359,17 @@ export class AgentRunner {
         return;
       }
     } catch (error) {
-      const text = this.safeError(error);
+      const expectedDemoDecision = isExpectedDemoPolicyDecision(error);
+      const text = expectedDemoDecision ? expectedDemoPolicyDecisionText(error, chat) : this.safeError(error);
       this.finishOpenActivities(run, text);
-      this.recordActivity(run, { kind: 'refusal', title: 'Request stopped', detail: text, status: 'failed' });
+      this.recordActivity(run, expectedDemoDecision
+        ? { kind: 'policy-decision', title: 'Expected demo policy decision', detail: error.message }
+        : { kind: 'refusal', title: 'Request stopped', detail: text, status: 'failed' });
       this.event('request-refused', chat, { outcome: 'denied', reason: error.code || 'sdk_error', message: text, source: 'governance' });
-      chat.messages.push({ role: 'assistant', content: text, source: 'governance', activity: structuredClone(run.activity), at: new Date().toISOString() });
+      chat.messages.push({ role: 'assistant', content: text, source: 'governance', code: error.code || 'sdk_error', expectedDemoDecision,
+        activity: structuredClone(run.activity), at: new Date().toISOString() });
       this.governance.updateChat(chat);
-      emit({ type: 'message', text, source: 'governance', route: null, code: error.code || 'sdk_error' });
+      emit({ type: 'message', text, source: 'governance', route: null, code: error.code || 'sdk_error', expectedDemoDecision });
     } finally { clearTimeout(timer); run.live = false; run.controller.abort(); await this.stopRunClient(run); this.activeRun = null; }
   }
   tool(run, id, args, invocation) {
@@ -461,7 +480,7 @@ export class AgentRunner {
         let httpStatus;
         let retryable = false;
         try {
-          const timeout = Math.max(1, Math.min(60_000, run.deadline - Date.now()));
+          const timeout = this.providerAttemptTimeout(route, run.deadline);
           const response = await fetch(route.baseUrl + '/chat/completions', { method: 'POST', headers, body: serialized,
             redirect: 'error', signal: AbortSignal.any([run.controller.signal, AbortSignal.timeout(timeout)]) });
           httpStatus = response.status;

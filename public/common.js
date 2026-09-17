@@ -47,8 +47,11 @@ async function api(url, method = 'GET', body) {
   }
   return data;
 }
-function routeText(route, source) {
-  if (source === 'governance') return 'Governance refusal';
+export function routeText(route, source, code, expectedDemoDecision = false) {
+  if (source === 'governance') {
+    if (expectedDemoDecision) return `Expected demo policy decision · ${code}`;
+    return `Request stopped${code ? ` · ${code}` : ''}`;
+  }
   if (!route) return '';
   const execution = `GitHub Copilot SDK · ${route.name} / ${route.model}`;
   return route.environmentDeclaration?.statement ? `${execution} · ${route.environmentDeclaration.statement}` : execution;
@@ -111,7 +114,7 @@ async function stream(url, body, handle) {
 
 export function mountChatPage() {
   let chat = null, busy = false, loaded = false, server;
-  const storyState = { stepIndex: 0, started: false, auto: false, running: false, timer: null };
+  const storyState = { stepIndex: 0, started: false, auto: false, running: false, preflighted: false, timer: null };
   const prompt = $('promptInput'), transcript = $('chatTranscript');
   const storySelect = $('demoStorySelect');
   function controls() {
@@ -154,7 +157,7 @@ export function mountChatPage() {
   function render() {
     transcript.replaceChildren();
     if (!chat?.messages.length) transcript.append(node('div', `Ask ${assistantName()} a question to begin.`, 'empty-state'));
-    else chat.messages.forEach(m => message(transcript, m.role, m.content ?? m.text ?? '', routeText(m.route, m.source), m.activity || [], false, levelTone, assistantName()));
+    else chat.messages.forEach(m => message(transcript, m.role, m.content ?? m.text ?? '', routeText(m.route, m.source, m.code, m.expectedDemoDecision), m.activity || [], false, levelTone, assistantName()));
     status();
   }
   function resetChatView() {
@@ -205,7 +208,7 @@ export function mountChatPage() {
     busy = true; controls(); alert('chatAlerts', ''); prompt.value = '';
     let pending;
     const liveActivity = [];
-    const outcome = { ok: true, code: null, error: null, events: [], chat: null };
+    const outcome = { ok: true, code: null, error: null, expectedDemoDecision: false, events: [], chat: null };
     try {
       if (!chat) await createChat();
       const before = { level: chat.level, sovereignty: chat.sovereignty, scope: copy(chat.scope ?? null) };
@@ -224,7 +227,7 @@ export function mountChatPage() {
           if (changed) alert('chatAlerts', `Protection increased to ${chat.levelName || chat.level} · ${chat.sovereigntyName || chat.sovereignty}. This protection state now stays with the conversation.`, 'warning');
         } else if (event.type === 'delta') pending.body.textContent = (pending.body.textContent === 'Thinking…' ? '' : pending.body.textContent) + event.text;
         else if (event.type === 'route-fallback') alert('chatAlerts', `${event.fromRoute.name} was unavailable. Continuing with ${event.toRoute.name} under the same governed EU route policy.`, 'warning');
-        else if (event.type === 'message') { pending.body.textContent = event.text; pending.head.lastChild.textContent = routeText(event.route, event.source); outcome.code = event.code || null; }
+        else if (event.type === 'message') { pending.body.textContent = event.text; pending.head.lastChild.textContent = routeText(event.route, event.source, event.code, event.expectedDemoDecision); outcome.code = event.code || null; outcome.expectedDemoDecision = Boolean(event.expectedDemoDecision); }
         else if (event.type === 'error') { pending.body.textContent = event.message; pending.activity?.update(liveActivity, false); alert('chatAlerts', event.message); outcome.ok = false; outcome.code = event.code || 'runner_error'; outcome.error = event.message; }
         else if (event.type === 'done' && event.chat) { chat = event.chat; pending.activity?.update(liveActivity, false); }
       });
@@ -266,12 +269,22 @@ export function mountChatPage() {
     for (const scopeId of expect.enterpriseOrganizationIds || []) if (!current.scope?.enterpriseOrganizationIds?.includes(scopeId)) return `Missing ${scopeId}.`;
     return '';
   }
+  async function ensureDemoReady() {
+    if (storyState.preflighted) return;
+    const preflight = await api('/api/demo/preflight', 'POST', {});
+    if (!preflight.ok) {
+      const failed = Object.entries(preflight.checks).filter(([, passed]) => !passed).map(([name]) => name).join(', ');
+      throw new Error(`Demo preflight failed: ${failed}.`);
+    }
+    storyState.preflighted = true;
+  }
   async function runNextStoryStep() {
     if (storyState.running || busy || !loaded) return;
     storyState.running = true; controls();
     const story = selectedStory();
     try {
       if (!storyState.started || storyState.stepIndex >= story.steps.length) {
+        await ensureDemoReady();
         await startNewChat();
         storyState.stepIndex = 0;
         storyState.started = true;
@@ -282,7 +295,9 @@ export function mountChatPage() {
       const mismatch = checkExpected(step.expect, outcome);
       if (mismatch) throw new Error(mismatch);
       storyState.stepIndex += 1;
-      renderStoryStatus(storyState.stepIndex >= story.steps.length ? 'Story complete' : 'Step passed');
+      const completed = storyState.stepIndex >= story.steps.length;
+      renderStoryStatus(completed ? 'Story complete' : step.expect.code ? 'Expected policy decision' : 'Step passed');
+      if (step.expect.code) alert('chatAlerts', `Demo checkpoint passed: policy blocked the request as designed (${step.expect.code}).`, 'warning');
       if (storyState.auto && storyState.stepIndex < story.steps.length) {
         storyState.timer = setTimeout(() => { storyState.timer = null; void runNextStoryStep(); }, 1200);
       } else if (storyState.stepIndex >= story.steps.length) {
@@ -298,11 +313,7 @@ export function mountChatPage() {
   async function startAuto() {
     if (storyState.auto || storyState.running || busy) return;
     try {
-      const preflight = await api('/api/demo/preflight', 'POST', {});
-      if (!preflight.ok) {
-        const failed = Object.entries(preflight.checks).filter(([, passed]) => !passed).map(([name]) => name).join(', ');
-        throw new Error(`Auto preflight failed: ${failed}.`);
-      }
+      await ensureDemoReady();
       storyState.auto = true; controls();
       await runNextStoryStep();
     } catch (error) {
@@ -316,7 +327,7 @@ export function mountChatPage() {
   prompt.onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit(); } };
   $('newChatButton').onclick = () => { if (!busy) void startNewChat().then(() => prompt.focus()).catch(error => alert('chatAlerts', error.message)); };
   storySelect.replaceChildren(...DEMO_STORIES.map(story => option(story.id, story.title)));
-  storySelect.onchange = () => { stopAuto(); storyState.stepIndex = 0; storyState.started = false; renderStoryStatus('Ready'); };
+  storySelect.onchange = () => { stopAuto(); storyState.stepIndex = 0; storyState.started = false; storyState.preflighted = false; renderStoryStatus('Ready'); };
   $('demoNextButton').onclick = () => { void runNextStoryStep(); };
   $('demoAutoButton').onclick = () => { void startAuto(); };
   $('demoStopButton').onclick = () => { stopAuto(storyState.running ? 'Stopping after current step' : 'Stopped'); };

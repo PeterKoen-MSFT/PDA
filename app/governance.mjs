@@ -678,6 +678,7 @@ export class Governance {
     const allowedEnvironments = this._allowedEntries(policy, 'allowedEnvironments', state.level).map(id => this._baseEnvironmentId(id, policy));
     const environmentId = this._resolveEnvironmentId(state.sovereignty, policy);
     const namedRestrictedEnvironment = this._isNamedRestrictedEnvironment(environmentId, policy);
+    const environmentAware = this._rankSovereignty(environmentId, policy) > 0;
     const useEuPool = !namedRestrictedEnvironment && EU_POOL_ROUTE_IDS.includes(preference);
     const configuredPool = [...settings.euRouting.order];
     const poolIndex = new Map(configuredPool.map((routeId, index) => [routeId, index]));
@@ -685,10 +686,10 @@ export class Governance {
       ? configuredPool.sort((left, right) => settings.routes[left].costScore - settings.routes[right].costScore
         || poolIndex.get(left) - poolIndex.get(right))
       : configuredPool;
-    const compatibleEnvironmentRoutes = namedRestrictedEnvironment
+    const compatibleEnvironmentRoutes = environmentAware
       ? [...ROUTE_IDS].filter(routeId => this._environmentSatisfies(settings.routes[routeId]?.geography, environmentId, policy))
       : [];
-    const routeIds = namedRestrictedEnvironment
+    const routeIds = environmentAware
       ? [...new Set([preference, ...orderedPool, ...compatibleEnvironmentRoutes])]
       : useEuPool
         ? orderedPool
@@ -741,7 +742,7 @@ export class Governance {
       throw this._routeError(first?.code ?? 'NO_AUTHORIZED_ROUTE', first?.message ?? `No route satisfies ${state.sovereignty}`);
     }
     return {
-      strategy: namedRestrictedEnvironment ? `environment-aware-${settings.euRouting.strategy}` : useEuPool ? settings.euRouting.strategy : 'preference',
+      strategy: environmentAware ? `environment-aware-${settings.euRouting.strategy}` : useEuPool ? settings.euRouting.strategy : 'preference',
       fallbackEnabled: (useEuPool || compatibleEnvironmentRoutes.length > 1) && settings.euRouting.fallbackEnabled,
       routes,
       skipped,
@@ -823,7 +824,9 @@ export class Governance {
       };
     }
 
-    if (this._rankSovereignty(tool.sovereignty, policy) === 0 && this._rankLevel(state.level, policy) !== 0) {
+    const publicEgressToolIds = policy.publicEgressToolIds ?? DEPLOYMENT_SETTINGS.policy.publicEgressToolIds;
+    if (publicEgressToolIds.includes(toolId)
+      && (this._rankLevel(state.level, policy) !== 0 || this._rankSovereignty(state.sovereignty, policy) !== 0)) {
       return {
         allowed: false,
         reason: 'PUBLIC_TOOL_BLOCKED_FOR_PROTECTED_CHAT',
@@ -1723,6 +1726,7 @@ export class Governance {
       toolScopeRequirements,
       routeEnvironmentDeclarations,
     };
+    delete merged.routeScopeDeclarations;
     const activeVersion = this.active()?.payload?.version ?? baseView.policy.version ?? 0;
     const expectedVersion = activeVersion + 1;
     if (source.version !== undefined && Number(source.version) !== expectedVersion) {
@@ -2318,11 +2322,13 @@ export class Governance {
   }
 
   _routeForTool(tool, chat, excludedRouteIds = []) {
+    const policy = this._policyForChat(chat).payload;
     const route = this.recommendRoute(chat, excludedRouteIds);
     if (!this._environmentSatisfies(route.geography, tool.sovereignty, chat)) {
       return { allowed: false, reason: 'ON_PREM_TOOL_REQUIRES_ON_PREM_ROUTE' };
     }
-    if (this._rankSovereignty(tool.sovereignty, chat) === 0 && this._rankSovereignty(chat.sovereignty, chat) !== 0) {
+    if ((policy.publicEgressToolIds ?? DEPLOYMENT_SETTINGS.policy.publicEgressToolIds).includes(tool.id)
+      && this._rankSovereignty(chat.sovereignty, chat) !== 0) {
       return { allowed: false, reason: 'PUBLIC_TOOL_REQUIRES_PUBLIC_ROUTE' };
     }
     return { allowed: true, route };
