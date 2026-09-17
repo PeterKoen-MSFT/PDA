@@ -25,4 +25,31 @@ docs/governed-agent.mp4
 
 # Azure VM deployment config holds the basic-auth password.
 deploy/azure/pda-vm.config.json
+*.pem
+*.jks
+*.keystore
+*.credentials.json
+*.secrets.json
+/vault/
+/runtime-work/
+/ledger*.json*
+/chats.json
+/credentials.json
+
+# Recordings and generated presentation assets are private release inputs.
+*.mp4
 *.mkv
+*.mov
+*.avi
+*.webm
+*.pptx
+*.pdf
+/Archive/
+
+# Local exports, logs, and editor recovery files.
+*.log
+*.bak
+*.tmp
+*.zip
+*.7z
+*.bundle

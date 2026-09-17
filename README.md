@@ -131,6 +131,17 @@ These limits are visible by design. The demo establishes an executable governanc
 
 ## Run the demo
 
+This is a Windows-only, trusted-workstation demo. Review [SECURITY.md](SECURITY.md) before running it or publishing recordings and evidence. Use synthetic data only.
+
+Install a current Node.js LTS release and Ollama, then install the pinned Node dependencies outside the repository:
+
+```powershell
+npm install --prefix "$env:LOCALAPPDATA\PDA\sdk-demo\dependencies" @github/copilot-sdk@1.0.13 @primno/dpapi@2.0.1
+ollama pull qwen2.5:7b
+```
+
+Authenticate the Copilot CLI for the Public cloud route using your own account. Configure optional provider keys locally in Administrator; no keys are included in this repository. Model requests can incur provider charges. Ensure port 8110 is available: the start script stops an existing listener on that port before starting the demo.
+
 From PowerShell in the repository root:
 
 ```powershell
@@ -155,6 +166,7 @@ Stop the demo with:
 
 ## Repository map
 
+- [SECURITY.md](SECURITY.md) describes trusted-workstation assumptions, secret handling, vulnerability reporting, and publication checks.
 - [server.mjs](server.mjs) hosts the loopback API, static application, streaming chat endpoint, ledger APIs, and selected-chat export.
 - [app/agent.mjs](app/agent.mjs) creates SDK sessions, constrains available capabilities, mediates model traffic, and runs governed tools.
 - [app/governance.mjs](app/governance.mjs) owns policy, conversation state, route eligibility, credentials, elevation, scope, and refusals.
