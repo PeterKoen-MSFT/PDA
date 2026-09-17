@@ -1,0 +1,141 @@
+# Azure VM deployment
+
+This is an **optional** way to run the Policy Driven Agent demo on a single Azure
+Windows VM, reachable over a public HTTPS address with basic authentication. It is
+completely separate from the local [`startdemo.ps1`](../../startdemo.ps1) option —
+both produce the same running system, one on your workstation and one in Azure.
+
+The application is **not modified**. It keeps listening on loopback
+`127.0.0.1:8110`. On the VM, [Caddy](https://caddyserver.com/) terminates HTTPS,
+enforces basic auth, and reverse-proxies to the app. The GitHub Copilot SDK,
+Ollama, Mistral, the `settings/` files and the DPAPI-protected state all behave
+exactly as they do on-premises.
+
+## What gets created
+
+Everything is provisioned with **Bicep Azure Verified Modules** into one resource
+group in **Sweden Central**. The resource group and every resource are tagged
+`SecurityControl: Ignore`.
+
+| Resource | Module | Notes |
+| --- | --- | --- |
+| Resource group | (created by the script) | Created if it does not exist. |
+| Staging storage | `avm/res/storage/storage-account` | Hands the bootstrap + app package to the VM, then is deleted with the group. |
+| Network security group | `avm/res/network/network-security-group` | Allows inbound 443, 80 (HTTPS cert), 3389 (RDP). |
+| Virtual network | `avm/res/network/virtual-network` | Single subnet. |
+| Windows VM + public IP | `avm/res/compute/virtual-machine` | `Standard_E8s_v5` (8 vCPU, 64 GiB RAM, no GPU), Windows Server 2025. |
+
+The VM's custom script extension installs PowerShell 7, Node.js, Ollama, Caddy, the
+Visual C++ redistributable (required by the Copilot SDK's native runtime) and the
+GitHub CLI (used to authenticate the Copilot route), unpacks the application,
+installs the pinned `@github/copilot-sdk@1.0.13` and `@primno/dpapi@2.0.1`
+dependencies, writes the Caddy configuration, configures auto-logon, and registers
+two scheduled tasks:
+
+- **PDA-Caddy** — runs as SYSTEM at startup, so the public HTTPS endpoint is always up.
+- **PDA-Demo** — runs `startdemo.ps1` as the administrator at **logon**. The VM is
+  configured for **auto-logon**, so every boot creates the administrator's session
+  automatically (no RDP) and fires this task, which starts the app. Running as the
+  same user each time keeps DPAPI secrets consistent, and the Copilot route reads its
+  GitHub token from the GitHub CLI (`gh auth token`), which persists per-user across
+  reboots.
+
+  Auto-logon stores the administrator password as an LSA secret (via Sysinternals
+  Autologon), not as plaintext in the registry. The GitHub sign-in for the Copilot
+  route is a per-user step done **once** (see First run below); afterwards the token
+  is reused across reboots without RDP.
+
+## Prerequisites
+
+- PowerShell with the Az modules: `Install-Module Az -Scope CurrentUser`
+- The Bicep CLI (Az PowerShell uses it to compile the templates and does not install it automatically): `winget install Microsoft.Bicep` or `az bicep install`
+- `Connect-AzAccount` with rights to create the resource group and resources
+- A basic-auth password with no `"` characters in the config file
+
+## Configure
+
+Copy the example config and edit it. The real config holds the basic-auth
+credentials and is git-ignored.
+
+```powershell
+cd deploy/azure
+Copy-Item pda-vm.config.example.json pda-vm.config.json
+# edit pda-vm.config.json: set basicAuthPassword (and, if you like, other values)
+```
+
+The VM administrator password is **not** stored in the file — the deploy script
+prompts for it securely (or accept it via `-AdminPassword`).
+
+## Start (deploy)
+
+```powershell
+cd deploy/azure
+./Deploy-AzureVM.ps1
+```
+
+The script is **idempotent** — run it as often as you like. It ensures the
+resource group and tag, derives deterministic resource names, and deploys in
+incremental mode, so repeated runs converge to the same system instead of creating
+duplicates. When it finishes it prints the public URL, the RDP host, and the
+basic-auth user.
+
+First run: RDP to the printed host as the VM administrator once, to complete the
+GitHub sign-in for the Copilot route. The Copilot SDK's runtime reads its token from
+the GitHub CLI (`gh auth token`), so sign in with `gh` using an account that has a
+GitHub Copilot subscription. The demo itself already runs from boot as a background
+service — the RDP session is only needed for this one-time sign-in:
+
+```powershell
+gh auth login   # choose GitHub.com -> HTTPS -> "Login with a web browser", then authorize
+```
+
+The `gh` token is stored per-user and read on every turn, so it keeps working across
+reboots without RDP.
+
+Open the **Administrator** page to enter the Mistral key. Certificate issuance for
+the public name takes about a minute; until then the browser may show a TLS warning.
+
+Then browse to:
+
+- **User:** `https://<public-name>/`
+- **Administrator:** `https://<public-name>/admin`
+- **Compliance:** `https://<public-name>/compliance`
+
+…and sign in with the basic-auth user and password from your config file. Chat,
+Administrator, Compliance and the guided demo stories work unchanged.
+
+## Update
+
+Re-run the deploy script. It repackages the current working tree, uploads it, and
+the VM re-extracts the application and restarts the services:
+
+```powershell
+./Deploy-AzureVM.ps1
+```
+
+The deploy also restarts the demo task, so an update takes effect immediately
+without RDP. After an unattended VM reboot the demo comes back on its own; if you
+ever need to force a restart, `Start-ScheduledTask -TaskName PDA-Demo` (or a plain
+reboot) is enough — no interactive logon required.
+
+## Remove
+
+Deletes the resource group and everything in it (VM, disk, network, public IP,
+staging storage). It does not touch the local deployment.
+
+```powershell
+./Remove-AzureVM.ps1          # prompts for confirmation
+./Remove-AzureVM.ps1 -Force   # no prompt
+```
+
+## Notes and limits
+
+- The VM is Windows because the app uses Windows DPAPI (`@primno/dpapi`) for its
+  protected state. DPAPI state is per-user; a fresh VM starts with fresh state and
+  you enter secrets (e.g. the Mistral key) once via the Administrator page.
+- Basic auth is the only gate on the public endpoint, as requested. Restrict
+  `allowedSourceAddressPrefix` in the config to your IP/CIDR if you want to limit
+  who can reach it.
+- Ollama runs on CPU (no GPU). A full story can take several minutes, the same as
+  on the local CPU workstation.
+- The local `startdemo.ps1` / `stopdemo.ps1` flow is unchanged and independent.

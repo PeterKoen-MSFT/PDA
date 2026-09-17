@@ -21,6 +21,10 @@ obj/
 *.key
 *.pfx
 *.p12
+docs/governed-agent.mp4
+
+# Azure VM deployment config holds the basic-auth password.
+deploy/azure/pda-vm.config.json
 *.pem
 *.jks
 *.keystore
