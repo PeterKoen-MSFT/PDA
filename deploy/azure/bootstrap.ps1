@@ -51,7 +51,10 @@ foreach ($d in @($Root, $NodeDir, $OllamaDir, $CaddyDir, $PwshDir, $DepsDir, $Mo
 
 Start-Transcript -Path (Join-Path $LogDir 'bootstrap.log') -Append | Out-Null
 
-function Write-Step { param([string] $Message) Write-Host "[bootstrap] $Message" }
+$BootstrapStart = Get-Date
+Write-Host "[bootstrap] $($BootstrapStart.ToString('yyyy-MM-dd HH:mm:ss zzz')) Bootstrap started."
+
+function Write-Step { param([string] $Message) Write-Host "[bootstrap] $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz')) $Message" }
 
 function Add-MachinePath {
     param([string] $Directory)
@@ -295,4 +298,10 @@ $demoSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStop
 Register-ScheduledTask -TaskName 'PDA-Demo' -Action $demoAction -Trigger $demoTrigger -Principal $demoPrincipal -Settings $demoSettings | Out-Null
 
 Write-Step 'Bootstrap complete.'
+$BootstrapEnd = Get-Date
+$elapsed = $BootstrapEnd - $BootstrapStart
+Write-Host ("[bootstrap] {0} Bootstrap finished. Started {1}, elapsed {2:hh\:mm\:ss} (hh:mm:ss)." -f `
+    $BootstrapEnd.ToString('yyyy-MM-dd HH:mm:ss zzz'), `
+    $BootstrapStart.ToString('yyyy-MM-dd HH:mm:ss zzz'), `
+    $elapsed)
 Stop-Transcript | Out-Null
