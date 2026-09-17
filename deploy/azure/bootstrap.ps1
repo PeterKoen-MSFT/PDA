@@ -41,10 +41,11 @@ $CaddyDir   = Join-Path $Root 'caddy'
 $PwshDir    = Join-Path $Root 'pwsh'
 $DepsDir    = Join-Path $Root 'dependencies'
 $ModelsDir  = Join-Path $Root 'ollama-models'
+$GhDir      = Join-Path $Root 'gh'
 $CaddyFile  = Join-Path $Root 'Caddyfile'
 $LogDir     = Join-Path $Root 'logs'
 
-foreach ($d in @($Root, $NodeDir, $OllamaDir, $CaddyDir, $PwshDir, $DepsDir, $ModelsDir, $LogDir)) {
+foreach ($d in @($Root, $NodeDir, $OllamaDir, $CaddyDir, $PwshDir, $DepsDir, $ModelsDir, $GhDir, $LogDir)) {
     New-Item -ItemType Directory -Path $d -Force | Out-Null
 }
 
@@ -133,6 +134,34 @@ if (-not (Test-Path $caddyExe)) {
     Invoke-WebRequest -Uri 'https://caddyserver.com/api/download?os=windows&arch=amd64' -OutFile $caddyExe
 }
 Add-MachinePath $CaddyDir
+
+# --- Visual C++ runtime --------------------------------------------------------
+# The Copilot SDK's native runtime (copilot-runtime.exe) links against the MSVC
+# runtime; without it the SDK child process exits with 0xC0000135 (DLL not found).
+if (-not (Test-Path (Join-Path $env:SystemRoot 'System32\vcruntime140_1.dll'))) {
+    Write-Step 'Installing the Visual C++ redistributable'
+    $vc = Join-Path $env:TEMP 'vc_redist.x64.exe'
+    Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $vc
+    Start-Process -FilePath $vc -ArgumentList '/quiet', '/norestart' -Wait
+    Remove-Item $vc -Force -ErrorAction SilentlyContinue
+}
+
+# --- GitHub CLI ----------------------------------------------------------------
+# The Copilot SDK runtime authenticates the Copilot route via `gh auth token`, so gh
+# must be on the machine PATH. The operator runs `gh auth login` once; the token then
+# persists per-user and is read on every turn (works headless, across reboots).
+$ghExe = Join-Path $GhDir 'bin\gh.exe'
+if (-not (Test-Path $ghExe)) {
+    Write-Step 'Installing the GitHub CLI'
+    $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/cli/cli/releases/latest' -Headers @{ 'User-Agent' = 'pda-bootstrap' }
+    $asset = $rel.assets | Where-Object { $_.name -like '*windows_amd64.zip' } | Select-Object -First 1
+    if (-not $asset) { throw 'Could not resolve the gh windows_amd64.zip release asset.' }
+    $zip = Join-Path $env:TEMP 'gh.zip'
+    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+    Expand-ToDirectory -ZipPath $zip -Destination $GhDir
+    Remove-Item $zip -Force -ErrorAction SilentlyContinue
+}
+Add-MachinePath (Join-Path $GhDir 'bin')
 
 # --- Application (unchanged) ---------------------------------------------------
 Write-Step 'Unpacking the application'
@@ -236,22 +265,34 @@ $caddySettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontSto
 Register-ScheduledTask -TaskName 'PDA-Caddy' -Action $caddyAction -Trigger $caddyTrigger -Principal $caddyPrincipal -Settings $caddySettings | Out-Null
 Start-ScheduledTask -TaskName 'PDA-Caddy'
 
-# The demo (Ollama + Node) runs in the administrator's security context at boot,
-# with no interactive logon and no RDP required, so the machine recovers by itself
-# after a restart. A batch (password) logon still loads the administrator profile,
-# so DPAPI CurrentUser secrets and the cached Copilot sign-in continue to work.
-# The task action keeps running while the app listens on 8110; that keeps the batch
-# logon session (and therefore the node process) alive, and lets Task Scheduler
-# restart the whole stack if it ever exits.
+# Auto-logon: the Copilot SDK's sign-in uses the Windows token broker (WAM/OneAuth),
+# which is only retrievable from an interactive logon session. Auto-logon creates such
+# a session automatically at every boot (no RDP), which fires the PDA-Demo AtLogon
+# trigger. Sysinternals Autologon stores the password as an LSA secret, not as
+# plaintext in the registry.
+Write-Step 'Configuring auto-logon for the demo administrator'
+$autologonExe = Join-Path $Root 'Autologon64.exe'
+if (-not (Test-Path $autologonExe)) {
+    $zip = Join-Path $env:TEMP 'Autologon.zip'
+    Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/AutoLogon.zip' -OutFile $zip
+    Expand-Archive -Path $zip -DestinationPath $Root -Force
+    Remove-Item $zip -Force -ErrorAction SilentlyContinue
+}
+& $autologonExe -accepteula $AdminUsername $env:COMPUTERNAME $AdminPassword | Out-Null
+$autoLogon = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'AutoAdminLogon' -ErrorAction SilentlyContinue).AutoAdminLogon
+if ($autoLogon -ne '1') { throw 'Auto-logon configuration failed (AutoAdminLogon is not 1).' }
+
+# The demo (Ollama + Node) runs in the administrator's interactive session, started at
+# logon. Auto-logon (above) creates that session automatically at every boot, so no RDP
+# is required. An interactive session is mandatory: the Copilot SDK's WAM/OneAuth token
+# cannot be read from a non-interactive (batch/service) logon.
 Write-Step 'Registering the demo start task'
 Unregister-ScheduledTask -TaskName 'PDA-Demo' -Confirm:$false -ErrorAction SilentlyContinue
-$demoSupervisor = "& '$AppDir\startdemo.ps1'; for (`$i = 0; `$i -lt 24 -and -not (Get-NetTCPConnection -LocalPort 8110 -State Listen -ErrorAction SilentlyContinue); `$i++) { Start-Sleep -Seconds 5 }; while (Get-NetTCPConnection -LocalPort 8110 -State Listen -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 30 }"
-$demoAction    = New-ScheduledTaskAction -Execute $pwshExe -Argument "-ExecutionPolicy Bypass -NoProfile -Command `"$demoSupervisor`"" -WorkingDirectory $AppDir
-$demoTrigger   = New-ScheduledTaskTrigger -AtStartup
-$demoSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
-# -User/-Password (batch logon) and -Principal are mutually exclusive parameter sets; pass RunLevel here.
-Register-ScheduledTask -TaskName 'PDA-Demo' -Action $demoAction -Trigger $demoTrigger -Settings $demoSettings -User $AdminUsername -Password $AdminPassword -RunLevel Highest | Out-Null
-Start-ScheduledTask -TaskName 'PDA-Demo'
+$demoAction    = New-ScheduledTaskAction -Execute $pwshExe -Argument "-ExecutionPolicy Bypass -NoProfile -File `"$AppDir\startdemo.ps1`"" -WorkingDirectory $AppDir
+$demoTrigger   = New-ScheduledTaskTrigger -AtLogOn -User $AdminUsername
+$demoPrincipal = New-ScheduledTaskPrincipal -UserId $AdminUsername -LogonType Interactive -RunLevel Highest
+$demoSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName 'PDA-Demo' -Action $demoAction -Trigger $demoTrigger -Principal $demoPrincipal -Settings $demoSettings | Out-Null
 
 Write-Step 'Bootstrap complete.'
 Stop-Transcript | Out-Null

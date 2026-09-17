@@ -25,22 +25,25 @@ group in **Sweden Central**. The resource group and every resource are tagged
 | Virtual network | `avm/res/network/virtual-network` | Single subnet. |
 | Windows VM + public IP | `avm/res/compute/virtual-machine` | `Standard_E8s_v5` (8 vCPU, 64 GiB RAM, no GPU), Windows Server 2025. |
 
-The VM's custom script extension installs PowerShell 7, Node.js, Ollama and Caddy,
-unpacks the application, installs the pinned `@github/copilot-sdk@1.0.13` and
-`@primno/dpapi@2.0.1` dependencies, writes the Caddy configuration, and registers
+The VM's custom script extension installs PowerShell 7, Node.js, Ollama, Caddy, the
+Visual C++ redistributable (required by the Copilot SDK's native runtime) and the
+GitHub CLI (used to authenticate the Copilot route), unpacks the application,
+installs the pinned `@github/copilot-sdk@1.0.13` and `@primno/dpapi@2.0.1`
+dependencies, writes the Caddy configuration, configures auto-logon, and registers
 two scheduled tasks:
 
 - **PDA-Caddy** — runs as SYSTEM at startup, so the public HTTPS endpoint is always up.
-- **PDA-Demo** — runs `startdemo.ps1` as the administrator at **startup**, using a
-  stored batch (password) logon. The app therefore starts by itself after every
-  reboot with no RDP and no interactive logon, while still running as the same user
-  each time so DPAPI secrets stay consistent and the cached Copilot sign-in is
-  reused. The task action stays alive while the app is listening, so Task Scheduler
-  keeps the process supervised and restarts it if it exits.
+- **PDA-Demo** — runs `startdemo.ps1` as the administrator at **logon**. The VM is
+  configured for **auto-logon**, so every boot creates the administrator's session
+  automatically (no RDP) and fires this task, which starts the app. Running as the
+  same user each time keeps DPAPI secrets consistent, and the Copilot route reads its
+  GitHub token from the GitHub CLI (`gh auth token`), which persists per-user across
+  reboots.
 
-  Copilot sign-in is the one exception: it is a per-user interactive step that must
-  be done **once** (see First run below). After that first sign-in the token is
-  cached in the administrator profile and reused across reboots without RDP.
+  Auto-logon stores the administrator password as an LSA secret (via Sysinternals
+  Autologon), not as plaintext in the registry. The GitHub sign-in for the Copilot
+  route is a per-user step done **once** (see First run below); afterwards the token
+  is reused across reboots without RDP.
 
 ## Prerequisites
 
@@ -77,13 +80,17 @@ duplicates. When it finishes it prints the public URL, the RDP host, and the
 basic-auth user.
 
 First run: RDP to the printed host as the VM administrator once, to complete the
-GitHub Copilot sign-in (the CLI is pre-installed; the sign-in is per-user and
-matches on-premises). The demo itself already runs from boot as a background
+GitHub sign-in for the Copilot route. The Copilot SDK's runtime reads its token from
+the GitHub CLI (`gh auth token`), so sign in with `gh` using an account that has a
+GitHub Copilot subscription. The demo itself already runs from boot as a background
 service — the RDP session is only needed for this one-time sign-in:
 
 ```powershell
-copilot        # then type /login and complete the device-code sign-in, then /exit
+gh auth login   # choose GitHub.com -> HTTPS -> "Login with a web browser", then authorize
 ```
+
+The `gh` token is stored per-user and read on every turn, so it keeps working across
+reboots without RDP.
 
 Open the **Administrator** page to enter the Mistral key. Certificate issuance for
 the public name takes about a minute; until then the browser may show a TLS warning.
