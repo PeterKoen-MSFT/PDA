@@ -21,5 +21,31 @@ obj/
 *.key
 *.pfx
 *.p12
-docs/governed-agent.mp4
+*.pem
+*.jks
+*.keystore
+*.credentials.json
+*.secrets.json
+/vault/
+/runtime-work/
+/ledger*.json*
+/chats.json
+/credentials.json
+
+# Recordings and generated presentation assets are private release inputs.
+*.mp4
 *.mkv
+*.mov
+*.avi
+*.webm
+*.pptx
+*.pdf
+/Archive/
+
+# Local exports, logs, and editor recovery files.
+*.log
+*.bak
+*.tmp
+*.zip
+*.7z
+*.bundle
