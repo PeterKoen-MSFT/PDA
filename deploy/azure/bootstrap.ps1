@@ -24,6 +24,7 @@ param(
     [Parameter(Mandatory)] [string] $BasicAuthUserB64,
     [Parameter(Mandatory)] [string] $BasicAuthPasswordB64,
     [Parameter(Mandatory)] [string] $AdminUsername,
+    [Parameter(Mandatory)] [string] $AdminPasswordB64,
     [string] $OllamaModel = 'qwen2.5:7b',
     [string] $NodeVersion = '22.11.0',
     [string] $PwshVersion = '7.4.6'
@@ -87,6 +88,7 @@ function Expand-ToDirectory {
 
 $BasicAuthUser     = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($BasicAuthUserB64))
 $BasicAuthPassword = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($BasicAuthPasswordB64))
+$AdminPassword     = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($AdminPasswordB64))
 
 # --- PowerShell 7 --------------------------------------------------------------
 $pwshExe = Join-Path $PwshDir 'pwsh.exe'
@@ -233,16 +235,22 @@ $caddySettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontSto
 Register-ScheduledTask -TaskName 'PDA-Caddy' -Action $caddyAction -Trigger $caddyTrigger -Principal $caddyPrincipal -Settings $caddySettings | Out-Null
 Start-ScheduledTask -TaskName 'PDA-Caddy'
 
-# The demo (Ollama + Node) runs in the administrator's interactive session at logon,
-# matching on-premises behaviour: DPAPI secrets are protected under that account and
-# Copilot sign-in can be completed over RDP. No stored password is required.
+# The demo (Ollama + Node) runs in the administrator's security context at boot,
+# with no interactive logon and no RDP required, so the machine recovers by itself
+# after a restart. A batch (password) logon still loads the administrator profile,
+# so DPAPI CurrentUser secrets and the cached Copilot sign-in continue to work.
+# The task action keeps running while the app listens on 8110; that keeps the batch
+# logon session (and therefore the node process) alive, and lets Task Scheduler
+# restart the whole stack if it ever exits.
 Write-Step 'Registering the demo start task'
 Unregister-ScheduledTask -TaskName 'PDA-Demo' -Confirm:$false -ErrorAction SilentlyContinue
-$demoAction    = New-ScheduledTaskAction -Execute $pwshExe -Argument "-ExecutionPolicy Bypass -NoProfile -File `"$AppDir\startdemo.ps1`"" -WorkingDirectory $AppDir
-$demoTrigger   = New-ScheduledTaskTrigger -AtLogOn -User $AdminUsername
-$demoPrincipal = New-ScheduledTaskPrincipal -UserId $AdminUsername -LogonType Interactive -RunLevel Highest
-$demoSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName 'PDA-Demo' -Action $demoAction -Trigger $demoTrigger -Principal $demoPrincipal -Settings $demoSettings | Out-Null
+$demoSupervisor = "& '$AppDir\startdemo.ps1'; for (`$i = 0; `$i -lt 24 -and -not (Get-NetTCPConnection -LocalPort 8110 -State Listen -ErrorAction SilentlyContinue); `$i++) { Start-Sleep -Seconds 5 }; while (Get-NetTCPConnection -LocalPort 8110 -State Listen -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 30 }"
+$demoAction    = New-ScheduledTaskAction -Execute $pwshExe -Argument "-ExecutionPolicy Bypass -NoProfile -Command `"$demoSupervisor`"" -WorkingDirectory $AppDir
+$demoTrigger   = New-ScheduledTaskTrigger -AtStartup
+$demoPrincipal = New-ScheduledTaskPrincipal -UserId $AdminUsername -LogonType Password -RunLevel Highest
+$demoSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName 'PDA-Demo' -Action $demoAction -Trigger $demoTrigger -Principal $demoPrincipal -Settings $demoSettings -User $AdminUsername -Password $AdminPassword | Out-Null
+Start-ScheduledTask -TaskName 'PDA-Demo'
 
 Write-Step 'Bootstrap complete.'
 Stop-Transcript | Out-Null

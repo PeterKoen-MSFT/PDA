@@ -31,9 +31,16 @@ unpacks the application, installs the pinned `@github/copilot-sdk@1.0.13` and
 two scheduled tasks:
 
 - **PDA-Caddy** — runs as SYSTEM at startup, so the public HTTPS endpoint is always up.
-- **PDA-Demo** — runs `startdemo.ps1` in the administrator's session at logon, so
-  the demo starts (as the same user each time, keeping DPAPI secrets consistent)
-  and Copilot sign-in can be completed over RDP, just like on-premises.
+- **PDA-Demo** — runs `startdemo.ps1` as the administrator at **startup**, using a
+  stored batch (password) logon. The app therefore starts by itself after every
+  reboot with no RDP and no interactive logon, while still running as the same user
+  each time so DPAPI secrets stay consistent and the cached Copilot sign-in is
+  reused. The task action stays alive while the app is listening, so Task Scheduler
+  keeps the process supervised and restarts it if it exits.
+
+  Copilot sign-in is the one exception: it is a per-user interactive step that must
+  be done **once** (see First run below). After that first sign-in the token is
+  cached in the administrator profile and reused across reboots without RDP.
 
 ## Prerequisites
 
@@ -69,9 +76,10 @@ incremental mode, so repeated runs converge to the same system instead of creati
 duplicates. When it finishes it prints the public URL, the RDP host, and the
 basic-auth user.
 
-First run: RDP to the printed host as the VM administrator. The demo starts
-automatically at logon. Sign in to GitHub Copilot once (the CLI is pre-installed;
-the sign-in is per-user and matches on-premises):
+First run: RDP to the printed host as the VM administrator once, to complete the
+GitHub Copilot sign-in (the CLI is pre-installed; the sign-in is per-user and
+matches on-premises). The demo itself already runs from boot as a background
+service — the RDP session is only needed for this one-time sign-in:
 
 ```powershell
 copilot        # then type /login and complete the device-code sign-in, then /exit
@@ -98,8 +106,10 @@ the VM re-extracts the application and restarts the services:
 ./Deploy-AzureVM.ps1
 ```
 
-To apply an update immediately without waiting for the next logon, RDP in and
-either sign out/in or run `C:\PDA\app\startdemo.ps1`.
+The deploy also restarts the demo task, so an update takes effect immediately
+without RDP. After an unattended VM reboot the demo comes back on its own; if you
+ever need to force a restart, `Start-ScheduledTask -TaskName PDA-Demo` (or a plain
+reboot) is enough — no interactive logon required.
 
 ## Remove
 

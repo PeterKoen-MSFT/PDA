@@ -75,8 +75,9 @@ var publicFqdn = '${dnsLabel}.${location}.cloudapp.azure.com'
 
 // Secrets are base64-encoded so they can travel safely as command-line arguments
 // (the extension executes commandToExecute through cmd.exe, where characters such
-// as & would otherwise break the line). The values live in protectedSettings.
-var bootstrapCommand = 'powershell -ExecutionPolicy Bypass -NoProfile -File bootstrap.ps1 -Fqdn "${publicFqdn}" -BasicAuthUserB64 "${base64(basicAuthUsername)}" -BasicAuthPasswordB64 "${base64(basicAuthPassword)}" -AdminUsername "${adminUsername}" -OllamaModel "${ollamaModel}" -NodeVersion "${nodeVersion}" -PwshVersion "${pwshVersion}"'
+// as & would otherwise break the line). The values live in protectedSettings,
+// which the custom script extension encrypts at rest and in transit.
+var bootstrapCommand = 'powershell -ExecutionPolicy Bypass -NoProfile -File bootstrap.ps1 -Fqdn "${publicFqdn}" -BasicAuthUserB64 "${base64(basicAuthUsername)}" -BasicAuthPasswordB64 "${base64(basicAuthPassword)}" -AdminUsername "${adminUsername}" -AdminPasswordB64 "${base64(adminPassword)}" -OllamaModel "${ollamaModel}" -NodeVersion "${nodeVersion}" -PwshVersion "${pwshVersion}"'
 
 // ---------------------------------------------------------------------------
 // Network security group: allow inbound HTTPS, HTTP (ACME challenge) and RDP.
