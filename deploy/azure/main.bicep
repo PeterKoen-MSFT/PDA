@@ -186,7 +186,7 @@ module vm 'br/public:avm/res/compute/virtual-machine:0.22.3' = {
       caching: 'ReadWrite'
       diskSizeGB: osDiskSizeGB
       managedDisk: {
-        storageAccountType: 'Standard_LRS'
+        storageAccountType: 'Premium_LRS'
       }
     }
     nicConfigurations: [
